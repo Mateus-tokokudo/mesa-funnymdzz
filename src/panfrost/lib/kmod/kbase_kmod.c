@@ -485,8 +485,10 @@ kbase_kmod_csf_group_create(struct pan_kmod_dev *dev, uint32_t cs_queue_count,
    /* Endpoint masks/maxes match what panfork uses on all CSF parts:
     * a single tiler unit, all fragment/compute endpoints.  Tiler heap growth
     * is serviced by the kernel OOM path, so no application CSI exception
-    * handler is requested.  On uAPI 1.25+ use the current ioctl layout to ask
-    * the kernel to report recoverable CS faults through read(). */
+    * handler is requested (BASE_CSF_TILER_OOM_EXCEPTION_FLAG was tried and
+    * confirmed ineffective on this kernel: the group is terminated on an
+    * unhandled OOM regardless).  On uAPI 1.25+ use the current ioctl layout
+    * to ask the kernel to report recoverable CS faults through read(). */
    if (pan_kmod_driver_version_at_least(&dev->driver, 1, 25)) {
       union kbase_ioctl_cs_queue_group_create req = {
          .in = {
@@ -494,7 +496,9 @@ kbase_kmod_csf_group_create(struct pan_kmod_dev *dev, uint32_t cs_queue_count,
             .fragment_mask = ~0ull,
             .compute_mask = ~0ull,
             .cs_min = cs_queue_count,
-            .priority = 1,
+            .priority = 0, /* BASE_QUEUE_GROUP_PRIORITY_HIGH: resist CSG rotation so the
+                              * Pixel kbase off-slot heap-reclaim shrinker cannot
+                              * empty our tiler heaps under memory pressure. */
             .tiler_max = 1,
             .fragment_max = 64,
             .compute_max = 64,
@@ -522,7 +526,9 @@ kbase_kmod_csf_group_create(struct pan_kmod_dev *dev, uint32_t cs_queue_count,
          .fragment_mask = ~0ull,
          .compute_mask = ~0ull,
          .cs_min = cs_queue_count,
-         .priority = 1,
+         .priority = 0, /* BASE_QUEUE_GROUP_PRIORITY_HIGH: resist CSG rotation so the
+                              * Pixel kbase off-slot heap-reclaim shrinker cannot
+                              * empty our tiler heaps under memory pressure. */
          .tiler_max = 1,
          .fragment_max = 64,
          .compute_max = 64,
@@ -650,7 +656,9 @@ kbase_kmod_csf_queue_bind(struct pan_kmod_dev *dev, uint32_t group_handle,
    struct kbase_ioctl_cs_queue_register reg = {
       .buffer_gpu_addr = ringbuf_va,
       .buffer_size = ringbuf_size,
-      .priority = 1,
+      .priority = 0, /* BASE_QUEUE_GROUP_PRIORITY_HIGH: resist CSG rotation so the
+                              * Pixel kbase off-slot heap-reclaim shrinker cannot
+                              * empty our tiler heaps under memory pressure. */
    };
 
    if (ioctl(dev->fd, KBASE_IOCTL_CS_QUEUE_REGISTER, &reg)) {
