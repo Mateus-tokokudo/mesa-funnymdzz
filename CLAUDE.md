@@ -99,6 +99,18 @@ All touched subqueues must be kicked before waiting on any (their streams cross-
 CSF-generic panvk code must use `panvk_get_csif_props()` / `panvk_get_flush_id()`
 (`panvk_device.h`) — never the `panthor_kmod_*` variants directly.
 
+**Tiler heap on kbase** (see `docs/kbase-minecraft-fault-analysis.md`): each Vulkan queue owns
+a kbase tiler heap (1 MiB chunks, max 400) that is renewed wholesale (create new + retire old
+ctx) every `KBASE_TILER_HEAP_RENEW_INTERVAL` (8) graphics submissions after draining;
+`PANVK_KBASE_HEAP_RENEW_INTERVAL` overrides, 0 disables. The retired ctx is destroyed only at
+a later renewal once both graphics subqueues re-armed HEAP_SET (destroying it immediately gave
+firmware a dangling chunk list -> wild-pointer 0xc0 faults). On kbase the command streams emit
+only VERTEX_TILER_STARTED — no VERTEX_TILER_COMPLETED / FRAGMENT_COMPLETED / FINISH_FRAGMENT,
+and no tiler-OOM IR handler (`cmdbuf_skips_gpu_heap_ops()` in `csf/panvk_vX_cmd_draw.c`): the
+kernel validates heap statistics on every chunk-grow request and kills the group when
+`frag_end > vt_end` (cross-CSG counter mixing) **or** when nothing is in flight (all-zero
+counters), so started-only is the only shape that always validates.
+
 **Synchronization is synchronous**: submissions are CPU-waited by polling seqno cells,
 semaphore waits/signals resolve on the CPU (`kbase_cpu_sync_type` spin-wait syncs in
 `panvk_physical_device.c`). Async submission (kbase fences/KCPU queues), sparse binding
