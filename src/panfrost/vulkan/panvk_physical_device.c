@@ -730,7 +730,11 @@ panvk_kbase_sync_set_pending(
 
    assert(sync->type->wait_many == kbase_cpu_sync_wait_many);
    mtx_lock(&ks->mutex);
-   assert(ks->state == KBASE_CPU_SYNC_RESET);
+   /* Binary payloads follow DRM-syncobj semantics: a new signal replaces
+    * whatever fence the sync currently holds, so re-arming from SIGNALED
+    * (e.g. a reused WSI semaphore that was CPU-waited) is legal.  Only an
+    * in-progress wait on the old payload would be a genuine bug. */
+   assert(ks->state != KBASE_CPU_SYNC_WAITING);
    ks->pending_data = data;
    ks->pending_wait = wait;
    memcpy(ks->targets, targets, sizeof(ks->targets));
