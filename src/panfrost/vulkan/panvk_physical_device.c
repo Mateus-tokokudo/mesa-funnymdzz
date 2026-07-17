@@ -1194,9 +1194,17 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
       goto fail_kbase;
 
    if (arch >= 10) {
-      device->csf.tiler.chunk_size = 2 * 1024 * 1024;
-      device->csf.tiler.initial_chunks = 5;
-      device->csf.tiler.max_chunks = 64;
+      /* 1 MiB chunks instead of the 2 MiB DRM-path default, as a
+       * precaution against allocation failure under memory fragmentation:
+       * kbase prefers order-9 huge pages for 2 MiB-aligned tiler-heap
+       * chunks, and on a long-running Android system the order >= 4 free
+       * lists are typically empty while gigabytes of order-0 pages remain.
+       * 1 MiB chunks take the discontiguous small-page path, which only
+       * needs order-0 pages; the GPU MMU provides the virtual contiguity.
+       * Chunk counts are doubled to keep the same byte budget. */
+      device->csf.tiler.chunk_size = 1024 * 1024;
+      device->csf.tiler.initial_chunks = 10;
+      device->csf.tiler.max_chunks = 400;
    }
 
    if (arch != 10)

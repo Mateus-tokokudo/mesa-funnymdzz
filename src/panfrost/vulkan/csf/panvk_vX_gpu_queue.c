@@ -68,7 +68,29 @@
 #define KBASE_SEQNO_MARK_POST_CALL 0x200000000000ull
 #define KBASE_SEQNO_MARK_POST_WAIT 0x300000000000ull
 #define KBASE_CACHELINE_SIZE 64
-#define KBASE_TILER_HEAP_RENEW_INTERVAL 32
+/* Graphics submissions between wholesale tiler-heap renewals.  With
+ * firmware chunk recycling disarmed (no FRAGMENT_COMPLETED heap ops on
+ * kbase), the heap only grows between renewals; 8 keeps the worst observed
+ * per-window growth around 100 MiB on heavy game workloads while the
+ * renewal drain stays infrequent enough not to show up in benchmarks. */
+#define KBASE_TILER_HEAP_RENEW_INTERVAL 8
+
+/* Diagnostic override for the tiler-heap renewal cadence.
+ * PANVK_KBASE_HEAP_RENEW_INTERVAL=0 disables renewal entirely; any positive
+ * value replaces the default interval. */
+static uint32_t
+kbase_tiler_heap_renew_interval(void)
+{
+   static uint32_t interval;
+
+   if (!interval) {
+      int64_t v = debug_get_num_option("PANVK_KBASE_HEAP_RENEW_INTERVAL",
+                                       KBASE_TILER_HEAP_RENEW_INTERVAL);
+      interval = (v <= 0 || v > UINT32_MAX) ? UINT32_MAX : (uint32_t)v;
+   }
+
+   return interval;
+}
 
 static VkResult
 kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
@@ -1911,7 +1933,7 @@ init_tiler(struct panvk_gpu_queue *queue)
       tiler_heap->context.dev_addr = heap_ctx_va;
       first_heap_chunk = first_chunk_va;
 
-      mesa_logd("kbase: tiler heap ctx 0x%" PRIx64
+      mesa_logi("kbase: tiler heap ctx 0x%" PRIx64
                 ", first chunk 0x%" PRIx64
                 ", chunk size %u, initial %u, max %u, target %u, mem group %u",
                 heap_ctx_va, first_chunk_va, tiler_heap->chunk_size,
@@ -1980,6 +2002,14 @@ cleanup_tiler(struct panvk_gpu_queue *queue)
 
 #ifdef HAVE_PAN_KMOD_KBASE
    if (gpu_queue_uses_kbase(dev)) {
+      /* The queue groups are terminated by now, so the retired context (if
+       * any) is no longer firmware-visible and can be destroyed with the
+       * current one. */
+      if (queue->kbase_retired_heap.ctx) {
+         kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev,
+                                           queue->kbase_retired_heap.ctx);
+         queue->kbase_retired_heap.ctx = 0;
+      }
       kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev,
                                         tiler_heap->context.dev_addr);
    } else
@@ -1998,6 +2028,37 @@ cleanup_tiler(struct panvk_gpu_queue *queue)
 }
 
 #ifdef HAVE_PAN_KMOD_KBASE
+/* Destroy the heap context retired by the previous renewal, provided every
+ * graphics subqueue has executed a ring entry emitted after the retirement.
+ * Each ring entry re-issues HEAP_SET before its CALL, and the caller's
+ * pre-renewal drain guarantees those entries completed, so the firmware
+ * provably no longer holds a reference to the retired context.  Destroying
+ * it any earlier lets kbase free (and the custom-VA allocator reuse) its
+ * chunks while a CS HEAP_SET register can still point at them: the firmware
+ * then walks whatever now lives at the old chunk VAs as a chunk list and
+ * faults on a garbage pointer (observed as an exception 0xc0 CSG fatal at a
+ * wild sideband address during heavy allocation churn).  Returns false when
+ * the context must stay retired for now. */
+static bool
+kbase_try_destroy_retired_heap(struct panvk_gpu_queue *queue)
+{
+   struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+
+   if (!queue->kbase_retired_heap.ctx)
+      return true;
+
+   if (queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.emitted_jobs <=
+          queue->kbase_retired_heap.vt_jobs ||
+       queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.emitted_jobs <=
+          queue->kbase_retired_heap.frag_jobs)
+      return false;
+
+   kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev,
+                                     queue->kbase_retired_heap.ctx);
+   queue->kbase_retired_heap.ctx = 0;
+   return true;
+}
+
 static VkResult
 kbase_renew_tiler_heap(struct panvk_gpu_queue *queue)
 {
@@ -2007,6 +2068,12 @@ kbase_renew_tiler_heap(struct panvk_gpu_queue *queue)
    struct panvk_tiler_heap *tiler_heap = &queue->tiler_heap;
    const uint32_t max_chunks = MAX2(phys_dev->csf.tiler.max_chunks, 200);
    uint64_t new_ctx, first_chunk;
+
+   /* Hold at most one retired context: if the previous one is still
+    * firmware-visible (no graphics ring entry ran since), skip this
+    * renewal and retry on a later graphics submission. */
+   if (!kbase_try_destroy_retired_heap(queue))
+      return VK_SUCCESS;
 
    if (kbase_kmod_csf_tiler_heap_create(
           dev->kmod.dev, tiler_heap->chunk_size,
@@ -2027,9 +2094,14 @@ kbase_renew_tiler_heap(struct panvk_gpu_queue *queue)
    }
    kbase_clean_priv_mem(tiler_heap->desc, 0, pan_size(TILER_HEAP));
 
-   kbase_kmod_csf_tiler_heap_destroy(dev->kmod.dev, old_ctx);
-   mesa_logd("kbase: renewed tiler heap 0x%" PRIx64 " -> 0x%" PRIx64
-             ", first chunk 0x%" PRIx64,
+   queue->kbase_retired_heap.ctx = old_ctx;
+   queue->kbase_retired_heap.vt_jobs =
+      queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.emitted_jobs;
+   queue->kbase_retired_heap.frag_jobs =
+      queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.emitted_jobs;
+
+   mesa_logi("kbase: renewed tiler heap 0x%" PRIx64 " -> 0x%" PRIx64
+             ", first chunk 0x%" PRIx64 " (old ctx retired)",
              old_ctx, new_ctx, first_chunk);
    return VK_SUCCESS;
 }
@@ -2537,7 +2609,7 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
       BITFIELD_BIT(PANVK_SUBQUEUE_FRAGMENT);
    if ((touched & graphics_mask) &&
        ++queue->kbase_tiler_submit_count >=
-          KBASE_TILER_HEAP_RENEW_INTERVAL) {
+          kbase_tiler_heap_renew_interval()) {
       result = kbase_wait_sync_targets(queue, submit->kbase_target_seqnos,
                                        UINT64_MAX);
       if (result != VK_SUCCESS)
@@ -2869,10 +2941,12 @@ panvk_per_arch(create_gpu_queue)(struct panvk_device *dev,
 err_cleanup_created:
 #ifdef HAVE_PAN_KMOD_KBASE
    if (uses_kbase) {
-      if (tiler_initialized)
-         cleanup_tiler(queue);
+      /* Groups before heaps, so no firmware CS still references a heap
+       * context when it is destroyed. */
       if (group_created)
          kbase_destroy_group(queue);
+      if (tiler_initialized)
+         cleanup_tiler(queue);
    } else
 #endif
    {
@@ -2908,8 +2982,10 @@ panvk_per_arch(destroy_gpu_queue)(struct vk_queue *vk_queue)
    cleanup_queue(queue);
 #ifdef HAVE_PAN_KMOD_KBASE
    if (gpu_queue_uses_kbase(dev)) {
-      cleanup_tiler(queue);
+      /* Terminate the groups first so no firmware CS can still hold a
+       * HEAP_SET reference when the tiler heap contexts are destroyed. */
       kbase_destroy_group(queue);
+      cleanup_tiler(queue);
    } else
 #endif
    {

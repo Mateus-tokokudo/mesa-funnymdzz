@@ -136,6 +136,17 @@ struct panvk_gpu_queue {
       uint64_t dev;
    } kbase_seqnos;
    uint32_t kbase_tiler_submit_count;
+   /* Tiler heap context retired by the last heap renewal.  The firmware CS
+    * HEAP_SET registers keep pointing at the old context until each graphics
+    * subqueue executes its next ring entry, so the context is only
+    * destroyed once both graphics subqueues have provably re-armed HEAP_SET
+    * (their emitted-job counts passed the values recorded at retirement and
+    * the pre-renewal drain completed).  ctx == 0 means the slot is empty. */
+   struct {
+      uint64_t ctx;
+      uint64_t vt_jobs;
+      uint64_t frag_jobs;
+   } kbase_retired_heap;
 #endif
 
    struct {
