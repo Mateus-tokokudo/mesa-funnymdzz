@@ -51,6 +51,31 @@
 #include "vk_render_pass.h"
 #include "poly/geometry.h"
 
+/* On kbase, tiler-heap maintenance is done wholesale by the queue's heap
+ * renewal (TERM+INIT of the whole heap) rather than through the firmware
+ * per-render-pass protocol: the VT and fragment work run in separate CS
+ * groups there, so the VERTEX_TILER_STARTED/COMPLETED statistics (VT group)
+ * and FRAGMENT_COMPLETED credits (fragment group) accumulate against
+ * different heap generations.  The kernel validates the statistics reported
+ * with each tiler-OOM chunk request and terminates the group when they are
+ * inconsistent ("Invalid Heap statistics provided by firmware"), so on
+ * kbase we suppress VERTEX_TILER_COMPLETED, FRAGMENT_COMPLETED and
+ * FINISH_FRAGMENT heap maintenance.  VERTEX_TILER_STARTED alone is still
+ * emitted (from the VT stream): the same kernel validation also rejects
+ * requests with zero render passes in flight, so the started counter must
+ * advance; with the completed counters pinned at zero the statistics stay
+ * ordered and in-flight stays positive, while firmware chunk recycling
+ * remains disarmed. */
+static inline bool
+cmdbuf_skips_gpu_heap_ops(const struct panvk_cmd_buffer *cmdbuf)
+{
+   const struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
+   const struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(dev->vk.physical);
+
+   return phys_dev->kbase_node_path[0] != '\0';
+}
+
 #if PAN_ARCH < 14
 static enum cs_reg_perm
 provoking_vertex_fn_reg_perm_cb(struct cs_builder *b, unsigned reg)
@@ -1204,6 +1229,15 @@ get_tiler_desc(struct panvk_cmd_buffer *cmdbuf)
    cs_next_iter_sb(cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER,
                    cs_scratch_reg_tuple(b, 0, 2));
 
+   /* On kbase, VERTEX_TILER_STARTED is the only heap operation emitted (see
+    * cmdbuf_skips_gpu_heap_ops()): the kernel's tiler-OOM chunk-grow path
+    * rejects requests whose statistics show no render pass in flight
+    * ("Invalid Heap statistics provided by firmware: vt_start 0, vt_end 0,
+    * frag_end 0"), so the started counter must advance.  With no
+    * FRAGMENT_COMPLETED ever emitted, nr_in_flight = vt_start - frag_end
+    * stays positive and monotonically increasing, which both passes
+    * validation and keeps firmware chunk recycling disarmed (the heap is
+    * recycled wholesale by the queue's heap renewal instead). */
    cs_vt_start(b, cs_now());
    return VK_SUCCESS;
 }
@@ -3515,7 +3549,8 @@ flush_tiling(struct panvk_cmd_buffer *cmdbuf)
                 offsetof(struct panvk_cs_subqueue_context, syncobjs));
 
    cs_move64_to(b, add_val, 1);
-   cs_vt_end(b, cs_defer_indirect());
+   if (!cmdbuf_skips_gpu_heap_ops(cmdbuf))
+      cs_vt_end(b, cs_defer_indirect());
    panvk_per_arch(kbase_mark_progress)(
       cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER,
       PANVK_KBASE_PROGRESS_VT_AFTER_VT_END);
@@ -3538,7 +3573,8 @@ flush_tiling(struct panvk_cmd_buffer *cmdbuf)
    cs_move64_to(b, add_val, 1);
 
    cs_match_iter_sb(b, x, iter_sb, cmp_scratch) {
-      cs_vt_end(b, cs_defer(SB_WAIT_ITER(x), SB_ID(DEFERRED_SYNC)));
+      if (!cmdbuf_skips_gpu_heap_ops(cmdbuf))
+         cs_vt_end(b, cs_defer(SB_WAIT_ITER(x), SB_ID(DEFERRED_SYNC)));
       panvk_per_arch(kbase_mark_progress)(
          cmdbuf, PANVK_SUBQUEUE_VERTEX_TILER,
          PANVK_KBASE_PROGRESS_VT_AFTER_VT_END);
@@ -3776,19 +3812,25 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
 
    /* Enable the oom handler before waiting for the vertex/tiler work.
     * At this point, the tiler oom context has been set up with the correct
-    * state for this renderpass, so it's safe to enable. */
+    * state for this renderpass, so it's safe to enable.
+    * On kbase the incremental-rendering handler is never registered: heap
+    * maintenance is renewal-based there (see cmdbuf_skips_gpu_heap_ops())
+    * and the handler would emit the FINISH_FRAGMENT/HEAP_OPERATION
+    * sequences we deliberately suppress. */
    struct cs_index addr_reg = cs_scratch_reg64(b, 0);
    struct cs_index length_reg = cs_scratch_reg32(b, 2);
 #if PAN_ARCH >= 14
    // TODO: Implement IR support for v14.
 #else
-   uint32_t handler_idx = calc_tiler_oom_handler_idx(cmdbuf);
-   uint64_t handler_addr = dev->tiler_oom.handlers_bo->addr.dev +
-                           handler_idx * dev->tiler_oom.handler_stride;
-   cs_move64_to(b, addr_reg, handler_addr);
-   cs_move32_to(b, length_reg, dev->tiler_oom.handler_stride);
-   cs_set_exception_handler(b, MALI_CS_EXCEPTION_TYPE_TILER_OOM, addr_reg,
-                            length_reg);
+   if (!cmdbuf_skips_gpu_heap_ops(cmdbuf)) {
+      uint32_t handler_idx = calc_tiler_oom_handler_idx(cmdbuf);
+      uint64_t handler_addr = dev->tiler_oom.handlers_bo->addr.dev +
+                              handler_idx * dev->tiler_oom.handler_stride;
+      cs_move64_to(b, addr_reg, handler_addr);
+      cs_move32_to(b, length_reg, dev->tiler_oom.handler_stride);
+      cs_set_exception_handler(b, MALI_CS_EXCEPTION_TYPE_TILER_OOM, addr_reg,
+                               length_reg);
+   }
 #endif
 
    /* Wait for the tiling to be done before submitting the fragment job. */
@@ -3813,8 +3855,9 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
 #if PAN_ARCH >= 14
    // TODO: Implement IR support for v14.
 #else
-   cs_set_exception_handler(b, MALI_CS_EXCEPTION_TYPE_TILER_OOM, addr_reg,
-                            length_reg);
+   if (!cmdbuf_skips_gpu_heap_ops(cmdbuf))
+      cs_set_exception_handler(b, MALI_CS_EXCEPTION_TYPE_TILER_OOM, addr_reg,
+                               length_reg);
 #endif
 
    /* Applications tend to forget to describe subpass dependencies, especially
@@ -3918,7 +3961,10 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
          cs_defer(SB_WAIT_ITER(sb_upd_ctx.cur_sb), SB_ITER(sb_upd_ctx.next_sb));
 #endif
 
-      if (td_count == 1) {
+      if (cmdbuf_skips_gpu_heap_ops(cmdbuf)) {
+         /* Heap chunks are reclaimed by the queue's wholesale heap renewal
+          * instead of FINISH_FRAGMENT/FRAGMENT_COMPLETED. */
+      } else if (td_count == 1) {
          cs_load_to(b, completed, cur_tiler, BITFIELD_MASK(4), 40);
          cs_finish_fragment(b, true, completed_top, completed_bottom, async);
       } else if (td_count > 1) {
