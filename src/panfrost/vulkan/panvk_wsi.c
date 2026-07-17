@@ -16,7 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(HAVE_PAN_KMOD_KBASE)
 #include "lib/kmod/kbase_kmod.h"
+#endif
 
 #include "vk_util.h"
 #include "wsi_common.h"
@@ -56,8 +58,12 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
       uses_kbase && dri3_option &&
       (!strcmp(dri3_option, "raw") || !strcmp(dri3_option, "termux"));
    const bool kbase_dmabuf =
+#if defined(HAVE_PAN_KMOD_KBASE)
       uses_kbase && dri3_option && strcmp(dri3_option, "0") != 0 &&
       kbase_kmod_supports_dmabuf(physical_device->kmod.dev);
+#else
+      false;
+#endif
    VkResult result;
 
    result = wsi_device_init(&physical_device->wsi_device,
