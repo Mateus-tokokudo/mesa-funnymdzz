@@ -91,6 +91,11 @@ struct kbase_kmod_dev {
 
    /* Android dma-heap used for BOs which need to be shared with WSI. */
    int dma_heap_fd;
+
+   /* Set when the CSF notification stream reports a queue-group error.
+    * Vulkan queue status queries use this latch instead of invalidating and
+    * reading every GPU subqueue context on every submission. */
+   uint32_t csf_error;
 };
 
 struct kbase_kmod_vm {
@@ -564,7 +569,8 @@ kbase_log_csf_queue_error(const char *kind, uint8_t group_handle,
 }
 
 static void
-kbase_log_csf_notification(const struct base_csf_notification *event)
+kbase_log_csf_notification(struct pan_kmod_dev *dev,
+                           const struct base_csf_notification *event)
 {
    STATIC_ASSERT(sizeof(struct base_csf_notification) == 64);
 
@@ -583,6 +589,10 @@ kbase_log_csf_notification(const struct base_csf_notification *event)
                 event->type);
       return;
    }
+
+   struct kbase_kmod_dev *kbase_dev =
+      container_of(dev, struct kbase_kmod_dev, base);
+   p_atomic_set(&kbase_dev->csf_error, true);
 
    const uint8_t group_handle = event->payload.csg_error.handle;
    const struct base_gpu_queue_group_error *error =
@@ -778,9 +788,17 @@ kbase_kmod_csf_wait_event(struct pan_kmod_dev *dev, int64_t timeout_ns)
       return -1;
    }
 
-   kbase_log_csf_notification(&event);
+   kbase_log_csf_notification(dev, &event);
 
    return 0;
+}
+
+bool
+kbase_kmod_csf_has_error(const struct pan_kmod_dev *dev)
+{
+   const struct kbase_kmod_dev *kbase_dev =
+      container_of(dev, const struct kbase_kmod_dev, base);
+   return p_atomic_read(&kbase_dev->csf_error);
 }
 
 int
@@ -1323,27 +1341,60 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev,
    kbase_bo->dmabuf_fd = -1;
    kbase_bo->owns_cpu_mapping = true;
 
-   union kbase_ioctl_mem_alloc req = {
-      .in = {
-         .va_pages     = va_pages,
-         .commit_pages = va_pages,
-         .flags        = to_kbase_mem_flags(kmod_flags),
-      },
-   };
+   uint64_t commit_pages = va_pages;
+   uint64_t extension = 0;
+   uint64_t alloc_flags = to_kbase_mem_flags(kmod_flags);
+   uint64_t alloc_gpu_va;
 
    if (kmod_flags & PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT) {
       /* Growable region: nothing committed up-front, grown in 2 MB
        * increments on GPU page fault (matches panfork's heap setup). */
-      req.in.commit_pages = 0;
-      req.in.extension = (2 * 1024 * 1024) / page_size;
+      commit_pages = 0;
+      extension = (2 * 1024 * 1024) / page_size;
    }
 
-   if (ioctl(dev->fd, KBASE_IOCTL_MEM_ALLOC, &req)) {
-      mesa_loge("kbase: KBASE_IOCTL_MEM_ALLOC failed: %s", strerror(errno));
-      goto err_free_bo;
+   if (kbase_dev->is_csf &&
+       pan_kmod_driver_version_at_least(&dev->driver, 1, 9)) {
+      /* Match current Arm userspace on modern CSF kernels.  Besides keeping
+       * the allocation ABI aligned with kbase, this leaves room for fixed-VA
+       * and future allocation parameters without another backend split. */
+      union kbase_ioctl_mem_alloc_ex req = {
+         .in = {
+            .va_pages = va_pages,
+            .commit_pages = commit_pages,
+            .extension = extension,
+            .flags = alloc_flags,
+         },
+      };
+
+      if (ioctl(dev->fd, KBASE_IOCTL_MEM_ALLOC_EX, &req)) {
+         mesa_loge("kbase: KBASE_IOCTL_MEM_ALLOC_EX failed: %s",
+                   strerror(errno));
+         goto err_free_bo;
+      }
+
+      alloc_flags = req.out.flags;
+      alloc_gpu_va = req.out.gpu_va;
+   } else {
+      union kbase_ioctl_mem_alloc req = {
+         .in = {
+            .va_pages = va_pages,
+            .commit_pages = commit_pages,
+            .extension = extension,
+            .flags = alloc_flags,
+         },
+      };
+
+      if (ioctl(dev->fd, KBASE_IOCTL_MEM_ALLOC, &req)) {
+         mesa_loge("kbase: KBASE_IOCTL_MEM_ALLOC failed: %s", strerror(errno));
+         goto err_free_bo;
+      }
+
+      alloc_flags = req.out.flags;
+      alloc_gpu_va = req.out.gpu_va;
    }
 
-   kbase_bo->same_va = (req.out.flags & BASE_MEM_SAME_VA) != 0;
+   kbase_bo->same_va = (alloc_flags & BASE_MEM_SAME_VA) != 0;
 
    /* Establish the CPU mapping right away:
     *  - for SAME_VA regions out.gpu_va is a cookie, and this mmap() is what
@@ -1354,21 +1405,21 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev,
     * The mapping is kept for the whole BO lifetime (see bo_mmap/bo_munmap).
     */
    void *cpu_ptr = mmap(NULL, va_pages * page_size, PROT_READ | PROT_WRITE,
-                        MAP_SHARED, dev->fd, req.out.gpu_va);
+                        MAP_SHARED, dev->fd, alloc_gpu_va);
    if (cpu_ptr == MAP_FAILED) {
       mesa_loge("kbase: mmap of BO (cookie/VA 0x%" PRIx64 ", size %" PRIu64
-                ") failed: %s", (uint64_t)req.out.gpu_va,
+                ") failed: %s", alloc_gpu_va,
                 va_pages * page_size, strerror(errno));
 
       /* MEM_FREE works on both real VAs and pending cookies. */
-      struct kbase_ioctl_mem_free free_req = { .gpu_addr = req.out.gpu_va };
+      struct kbase_ioctl_mem_free free_req = { .gpu_addr = alloc_gpu_va };
       ioctl(dev->fd, KBASE_IOCTL_MEM_FREE, &free_req);
       goto err_free_bo;
    }
 
    kbase_bo->cpu_ptr = cpu_ptr;
    kbase_bo->gpu_mapping = cpu_ptr;
-   kbase_bo->gpu_va = kbase_bo->same_va ? (uintptr_t)cpu_ptr : req.out.gpu_va;
+   kbase_bo->gpu_va = kbase_bo->same_va ? (uintptr_t)cpu_ptr : alloc_gpu_va;
 
    /* Allocate a unique u32 handle for the pan_kmod handle_to_bo table. */
    uint32_t handle = p_atomic_inc_return(&kbase_dev->next_handle);

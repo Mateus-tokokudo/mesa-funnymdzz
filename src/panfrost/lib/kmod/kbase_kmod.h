@@ -59,6 +59,10 @@ int kbase_kmod_csf_queue_kick(struct pan_kmod_dev *dev, uint64_t ringbuf_va);
  * Returns 0 on success (event consumed or timeout), -1 on error. */
 int kbase_kmod_csf_wait_event(struct pan_kmod_dev *dev, int64_t timeout_ns);
 
+/* Report whether this kbase context has seen a queue-group error.  The error
+ * state is latched while completion waits consume the notification stream. */
+bool kbase_kmod_csf_has_error(const struct pan_kmod_dev *dev);
+
 int kbase_kmod_csf_tiler_heap_create(struct pan_kmod_dev *dev,
                                      uint32_t chunk_size,
                                      uint32_t initial_chunks,

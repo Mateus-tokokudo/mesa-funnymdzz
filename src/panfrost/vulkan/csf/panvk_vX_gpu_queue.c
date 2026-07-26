@@ -3008,6 +3008,22 @@ panvk_per_arch(gpu_queue_check_status)(struct vk_queue *vk_queue)
       .group_handle = queue->group_handle,
    };
 
+#ifdef HAVE_PAN_KMOD_KBASE
+   /* kbase reports CSF faults through the notification stream consumed by
+    * completion waits.  Check its error latch instead of issuing three
+    * MEM_SYNC invalidations and reading the GPU-written subqueue contexts on
+    * every Vulkan status query. */
+   if (gpu_queue_uses_kbase(dev)) {
+      if (kbase_kmod_csf_has_error(dev->kmod.dev)) {
+         u_printf_with_ctx(stdout, &dev->printf.ctx);
+         return vk_queue_set_lost(&queue->vk,
+                                  "kbase: CSF queue-group error");
+      }
+
+      return VK_SUCCESS;
+   }
+#endif
+
    /* check for CS error and treat it as device lost */
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
       panvk_priv_mem_readback(queue->subqueues[i].context, 0,
@@ -3020,13 +3036,6 @@ panvk_per_arch(gpu_queue_check_status)(struct vk_queue *vk_queue)
          }
       }
    }
-
-#ifdef HAVE_PAN_KMOD_KBASE
-   /* No group-state query on kbase; the per-subqueue error check above is
-    * all we have until fault notifications are wired up. */
-   if (gpu_queue_uses_kbase(dev))
-      return VK_SUCCESS;
-#endif
 
    int ret = pan_kmod_ioctl(dev->drm_fd, DRM_IOCTL_PANTHOR_GROUP_GET_STATE,
                             &state);

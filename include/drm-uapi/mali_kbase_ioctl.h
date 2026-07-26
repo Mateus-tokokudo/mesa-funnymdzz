@@ -169,6 +169,26 @@ union kbase_ioctl_mem_alloc {
 #define KBASE_IOCTL_MEM_ALLOC \
    _IOWR(KBASE_IOCTL_TYPE, 5, union kbase_ioctl_mem_alloc)
 
+/* CSF uAPI 1.9 replaced MEM_ALLOC with an extensible request.  The first
+ * four input fields and the output overlay intentionally match the legacy
+ * request; fixed_address is zero unless BASE_MEM_FIXED is requested. */
+union kbase_ioctl_mem_alloc_ex {
+   struct {
+      __u64 va_pages;
+      __u64 commit_pages;
+      __u64 extension;
+      __u64 flags;
+      __u64 fixed_address;
+      __u64 extra[3];
+   } in;
+   struct {
+      __u64 flags;
+      __u64 gpu_va;
+   } out;
+};
+#define KBASE_IOCTL_MEM_ALLOC_EX \
+   _IOWR(KBASE_IOCTL_TYPE, 59, union kbase_ioctl_mem_alloc_ex)
+
 /* Memory allocation/import flags (base_mem_alloc_flags) */
 #define BASE_MEM_PROT_CPU_RD              ((__u64)1 << 0)
 #define BASE_MEM_PROT_CPU_WR              ((__u64)1 << 1)
