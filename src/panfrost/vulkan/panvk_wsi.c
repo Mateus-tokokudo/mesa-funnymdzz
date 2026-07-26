@@ -54,12 +54,22 @@ panvk_wsi_init(struct panvk_physical_device *physical_device)
       to_panvk_instance(physical_device->vk.instance);
    const bool uses_kbase = physical_device->kbase_node_path[0] != '\0';
    const char *dri3_option = getenv("PANVK_KBASE_DRI3");
+   /* The proprietary Termux:X11 layer uses WSI_X11_TERMUX=1 as its
+    * process-wide switch.  Accept the same switch here when no explicit
+    * PanVK override is present, so both ICDs exercise the same raw-FD DRI3
+    * transport instead of silently falling back to the slower SHM path. */
+   const char *termux_wsi = getenv("WSI_X11_TERMUX");
+   const bool termux_raw_dri3 =
+      uses_kbase && !dri3_option && termux_wsi && strcmp(termux_wsi, "0") != 0;
    const bool kbase_raw_dri3 =
-      uses_kbase && dri3_option &&
-      (!strcmp(dri3_option, "raw") || !strcmp(dri3_option, "termux"));
+      termux_raw_dri3 ||
+      (uses_kbase && dri3_option &&
+       (!strcmp(dri3_option, "raw") || !strcmp(dri3_option, "termux")));
    const bool kbase_dmabuf =
 #if defined(HAVE_PAN_KMOD_KBASE)
-      uses_kbase && dri3_option && strcmp(dri3_option, "0") != 0 &&
+      uses_kbase &&
+      ((!dri3_option && termux_raw_dri3) ||
+       (dri3_option && strcmp(dri3_option, "0") != 0)) &&
       kbase_kmod_supports_dmabuf(physical_device->kmod.dev);
 #else
       false;

@@ -300,7 +300,14 @@ panvk_per_arch(get_physical_device_features)(
       .drawIndirectFirstInstance = true,
       .depthClamp = true,
       .depthBiasClamp = true,
-      .fillModeNonSolid = false,
+      /*
+       * Valhall can rasterize point and line primitives.  Zink uses this
+       * feature as its desktop-GL capability gate; keep the feature exposed
+       * on the kbase path so applications which only use filled polygons do
+       * not get rejected during device selection.  Polygon-mode lowering is
+       * handled separately from the native point/line topology path.
+       */
+      .fillModeNonSolid = true,
       .depthBounds = false,
       .wideLines = true,
       .largePoints = true,

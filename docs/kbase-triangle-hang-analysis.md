@@ -87,6 +87,14 @@ kbase physical devices and disables DRM format modifiers.  Rendering still
 runs on the GPU; presentation copies through host-visible swapchain memory.
 DRM-backed PanVK devices retain the normal DMA-BUF/modifier path.
 
+On kbase stacks that expose the Android dma-heap import path, Termux:X11 can
+use PanVK's raw-FD DRI3 transport instead of the SHM copy path.  Set
+`WSI_X11_TERMUX=1` (or explicitly `PANVK_KBASE_DRI3=raw`) before creating the
+Vulkan instance.  PanVK now treats the former as an alias for the latter when
+no explicit `PANVK_KBASE_DRI3` override is present.  The proprietary ICD uses
+the separate implicit WSI layer and its `WSI_X11_TERMUX` switch; PanVK does not
+load that layer.
+
 Both XCB and Xlib presentation complete fixed-frame `vkcube` runs against
 Termux:X11.  Termux:X11 on the tested setup exposes only the filesystem Unix
 socket, so the chroot uses `DISPLAY=unix/:0` rather than `DISPLAY=:0`, which

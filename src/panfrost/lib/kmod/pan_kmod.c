@@ -354,6 +354,26 @@ pan_kmod_queue_bo_map_sync(struct pan_kmod_bo *bo, uint64_t bo_offset,
    uint64_t start = bo_offset & ~((uint64_t)util_cache_granularity() - 1);
    uint64_t end = ALIGN_POT(bo_offset + range, util_cache_granularity());
 
+   /* A command buffer often dirties several neighboring slices of the same
+    * mapped BO before the next submit.  Coalesce those slices here so a
+    * kernel-backed cache-sync implementation (notably kbase MEM_SYNC) does
+    * not issue one ioctl per descriptor or upload. */
+   util_dynarray_foreach(&dev->pending_bo_syncs.array,
+                         struct pan_kmod_deferred_bo_sync, sync) {
+      uint64_t sync_end = sync->start + sync->size;
+
+      if (sync->bo == bo && sync->type == type &&
+          start <= sync_end && sync->start <= end) {
+         uint64_t merged_start = MIN2(start, sync->start);
+         uint64_t merged_end = MAX2(end, sync_end);
+
+         sync->start = merged_start;
+         sync->size = merged_end - merged_start;
+         simple_mtx_unlock(&dev->pending_bo_syncs.lock);
+         return;
+      }
+   }
+
    struct pan_kmod_deferred_bo_sync new_sync = {
       .bo = bo,
       .start = start,

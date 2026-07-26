@@ -17,7 +17,8 @@ the extracted directory, and run `. ./env.sh` from Bash.
 ## Tested GPUs
 
 - Mali-G710 MC7 in Google Tensor G2 (Pixel 7): `vulkaninfo`, `vkcube`,
-  `vkmark`, and Termux:X11 presentation.
+  `vkmark`, Termux:X11 presentation, and Minecraft 26.2's native Vulkan
+  backend at 1920x1080.
 - Mali-G925 (reported as G725 by the tested platform): `vulkaninfo`, `vkmark`,
   and X11 presentation.
 
@@ -26,15 +27,31 @@ the extracted directory, and run `. ./env.sh` from Bash.
 ```sh
 export DISPLAY=:0
 export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/panfrost_kbase_icd.aarch64.json
-export PANVK_KBASE_DRI3=raw
+export WSI_X11_TERMUX=1
 
 vulkaninfo --summary
 vkmark --winsys xcb --present-mode immediate
 ```
 
+`PANVK_KBASE_DRI3=raw` remains available as the PanVK-specific spelling.
+`PANVK_KBASE_DRI3=0` explicitly selects the SHM fallback.
+
+Minecraft 26.2 can use its native Vulkan backend with the same environment.
+In Prism Launcher select **Prefer Vulkan (Experimental)**, or launch an
+existing instance directly:
+
+```sh
+prismlauncher -l 26.2
+```
+
+This release advertises the vertex attribute divisor and non-solid-fill
+capability gates required during Minecraft's Vulkan device selection.  The
+kbase tiler heap is renewed conservatively to prevent the queue-group OOM that
+previously surfaced as `VK_ERROR_DEVICE_LOST` after entering a world.
+
 Change `DISPLAY` to match the Termux:X11/Winlator session. The raw WSI path
 requires access to `/dev/dma_heap/system`; override it when necessary with
-`PANVK_KBASE_DMA_HEAP`. Without `PANVK_KBASE_DRI3=raw`, X11 presentation uses
+`PANVK_KBASE_DMA_HEAP`. Without either raw-WSI switch, X11 presentation uses
 the much slower MIT-SHM fallback.
 
 ## Container kernel warning

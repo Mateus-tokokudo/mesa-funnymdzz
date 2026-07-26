@@ -13,7 +13,8 @@ kbase kernel release.
 ## Tested hardware
 
 - Mali-G710 MC7 in Google Tensor G2 (Pixel 7), with Debian 13 in DroidSpaces.
-  `vulkaninfo`, `vkcube`, `vkmark`, and X11 presentation have been tested.
+  `vulkaninfo`, `vkcube`, `vkmark`, X11 presentation, and Minecraft 26.2's
+  native Vulkan backend at 1920x1080 have been tested.
 - Mali-G925 (reported as G725 by the tested platform). `vulkaninfo` and
   `vkmark`, including X11 presentation, have been tested.
 
@@ -63,10 +64,22 @@ explicitly is useful when another Vulkan driver is also installed:
 ```sh
 export DISPLAY=:0                 # Change this for the X server in use.
 export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/panfrost_kbase_icd.aarch64.json
-export PANVK_KBASE_DRI3=raw
+export WSI_X11_TERMUX=1
 
 vulkaninfo --summary
 vkmark --winsys xcb --present-mode immediate
+```
+
+`WSI_X11_TERMUX=1` selects PanVK's raw-FD Termux:X11 path when no explicit
+PanVK override is present.  `PANVK_KBASE_DRI3=raw` remains available, while
+`PANVK_KBASE_DRI3=0` explicitly selects the SHM fallback.
+
+Minecraft 26.2 can use the same environment with its native Vulkan backend.
+In Prism Launcher select **Prefer Vulkan (Experimental)**, or launch an
+existing instance directly:
+
+```sh
+prismlauncher -l 26.2
 ```
 
 OpenGL applications can run through Zink when a compatible Zink build is
@@ -91,9 +104,10 @@ DRM GEM buffer that way. The fast kbase WSI path instead:
 3. sends the same raw, mmap-able dma-buf to a compatible X server through its
    private DRI3 `PixmapFromBuffers` path.
 
-Set `PANVK_KBASE_DRI3=raw` (the alias `termux` is also accepted) to enable this
-path. The private raw-buffer modifier value is `1274`. Termux:X11 and Winlator
-builds that implement this protocol can present the buffer without a copy.
+Set `WSI_X11_TERMUX=1` or `PANVK_KBASE_DRI3=raw` (the alias `termux` is also
+accepted) to enable this path. The private raw-buffer modifier value is `1274`.
+Termux:X11 and Winlator builds that implement this protocol can present the
+buffer without a copy.
 
 The private raw protocol does not provide the normal DRI3 explicit-sync
 `FenceFromFD` behavior. PanVK therefore waits for GPU completion before

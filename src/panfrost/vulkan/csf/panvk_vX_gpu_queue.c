@@ -70,10 +70,12 @@
 #define KBASE_CACHELINE_SIZE 64
 /* Graphics submissions between wholesale tiler-heap renewals.  With
  * firmware chunk recycling disarmed (no FRAGMENT_COMPLETED heap ops on
- * kbase), the heap only grows between renewals; 8 keeps the worst observed
- * per-window growth around 100 MiB on heavy game workloads while the
- * renewal drain stays infrequent enough not to show up in benchmarks. */
-#define KBASE_TILER_HEAP_RENEW_INTERVAL 8
+ * kbase), the heap only grows between renewals.  Renew every graphics
+ * submission by default: large 1080p Minecraft scenes can exhaust the
+ * firmware heap even within eight submissions.  Workloads proven to have a
+ * smaller tiler footprint can select a longer cadence with
+ * PANVK_KBASE_HEAP_RENEW_INTERVAL. */
+#define KBASE_TILER_HEAP_RENEW_INTERVAL 1
 
 /* Diagnostic override for the tiler-heap renewal cadence.
  * PANVK_KBASE_HEAP_RENEW_INTERVAL=0 disables renewal entirely; any positive
@@ -179,20 +181,6 @@ kbase_clean_priv_mem(struct panvk_priv_mem mem, uint64_t offset, size_t size)
 
    if (cpu)
       kbase_cache_clean_range((uint8_t *)cpu + offset, size);
-}
-
-static void
-kbase_clean_pool(struct panvk_pool *pool)
-{
-   list_for_each_entry(struct panvk_priv_bo, bo, &pool->bos, node) {
-      if (bo->addr.host)
-         kbase_cache_clean_range(bo->addr.host, pan_kmod_bo_size(bo->bo));
-   }
-
-   list_for_each_entry(struct panvk_priv_bo, bo, &pool->big_bos, node) {
-      if (bo->addr.host)
-         kbase_cache_clean_range(bo->addr.host, pan_kmod_bo_size(bo->bo));
-   }
 }
 
 static uint32_t
@@ -2389,13 +2377,6 @@ panvk_queue_submit_init_cmdbufs(struct panvk_queue_submit *submit,
    for (uint32_t i = 0; i < vk_submit->command_buffer_count; i++) {
       struct panvk_cmd_buffer *cmdbuf = container_of(
          vk_submit->command_buffers[i], struct panvk_cmd_buffer, vk);
-
-#ifdef HAVE_PAN_KMOD_KBASE
-      if (gpu_queue_uses_kbase(dev)) {
-         kbase_clean_pool(&cmdbuf->cs_pool);
-         kbase_clean_pool(&cmdbuf->desc_pool);
-      }
-#endif
 
       uint32_t flush_id = panvk_get_flush_id(dev);
 
