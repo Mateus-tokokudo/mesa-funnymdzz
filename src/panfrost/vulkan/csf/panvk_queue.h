@@ -136,6 +136,7 @@ struct panvk_gpu_queue {
       uint64_t dev;
    } kbase_seqnos;
    uint32_t kbase_tiler_submit_count;
+   uint64_t kbase_tiler_work_count;
    /* Tiler heap context retired by the last heap renewal.  The firmware CS
     * HEAP_SET registers keep pointing at the old context until each graphics
     * subqueue executes its next ring entry, so the context is only

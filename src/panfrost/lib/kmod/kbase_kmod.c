@@ -1015,7 +1015,15 @@ kbase_kmod_dev_create(int fd, uint32_t flags,
       .version = { .major = ver.major, .minor = ver.minor },
    };
 
-   flags |= PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL;
+   /* kbase traditionally routes cached BO synchronization through
+    * KBASE_IOCTL_MEM_SYNC.  On AArch64, the generic kmod layer can instead
+    * issue the architected DC CVAC/CIVAC operations directly and batch one
+    * barrier per submit.  Keep the ioctl path as the conservative default,
+    * but allow devices with coherent GPU outer-cache behavior to opt into the
+    * lower-overhead userspace path for benchmarking and tuning. */
+   const char *user_cache_sync = getenv("PANVK_KBASE_USER_CACHE_SYNC");
+   if (!user_cache_sync || strcmp(user_cache_sync, "1"))
+      flags |= PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL;
 
    pan_kmod_dev_init(&kbase_dev->base, fd, flags, &kbase_drv,
                      &kbase_kmod_ops, allocator);

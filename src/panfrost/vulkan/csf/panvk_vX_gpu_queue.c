@@ -68,14 +68,14 @@
 #define KBASE_SEQNO_MARK_POST_CALL 0x200000000000ull
 #define KBASE_SEQNO_MARK_POST_WAIT 0x300000000000ull
 #define KBASE_CACHELINE_SIZE 64
-/* Graphics submissions between wholesale tiler-heap renewals.  With
- * firmware chunk recycling disarmed (no FRAGMENT_COMPLETED heap ops on
- * kbase), the heap only grows between renewals.  Renew every graphics
- * submission by default: large 1080p Minecraft scenes can exhaust the
- * firmware heap even within eight submissions.  Workloads proven to have a
- * smaller tiler footprint can select a longer cadence with
- * PANVK_KBASE_HEAP_RENEW_INTERVAL. */
-#define KBASE_TILER_HEAP_RENEW_INTERVAL 1
+/* With firmware chunk recycling disarmed (no FRAGMENT_COMPLETED heap ops on
+ * kbase), the heap only grows between renewals.  Light submissions can share
+ * a heap generation, while command buffers with enough estimated tiler work
+ * force renewal after the current submission.  This keeps Minecraft's large
+ * frames within the heap limit without draining the queues after every small
+ * vkmark/vkcube frame. */
+#define KBASE_TILER_HEAP_RENEW_INTERVAL 8
+#define KBASE_TILER_HEAP_RENEW_WORK 4096
 
 /* Diagnostic override for the tiler-heap renewal cadence.
  * PANVK_KBASE_HEAP_RENEW_INTERVAL=0 disables renewal entirely; any positive
@@ -92,6 +92,20 @@ kbase_tiler_heap_renew_interval(void)
    }
 
    return interval;
+}
+
+static uint64_t
+kbase_tiler_heap_renew_work(void)
+{
+   static uint64_t threshold = UINT64_MAX;
+
+   if (threshold == UINT64_MAX) {
+      int64_t v = debug_get_num_option("PANVK_KBASE_HEAP_RENEW_WORK",
+                                       KBASE_TILER_HEAP_RENEW_WORK);
+      threshold = v > 0 ? v : 0;
+   }
+
+   return threshold;
 }
 
 static VkResult
@@ -2095,6 +2109,7 @@ struct panvk_queue_submit {
    uint32_t wait_queue_mask;
    uint32_t signal_queue_mask;
    uint32_t req_resource_subqueue_mask;
+   uint64_t tiler_work_estimate;
 
    struct drm_panthor_queue_submit *qsubmits;
    struct drm_panthor_sync_op *wait_ops;
@@ -2152,6 +2167,12 @@ panvk_queue_submit_init_storage(
    for (uint32_t i = 0; i < vk_submit->command_buffer_count; i++) {
       struct panvk_cmd_buffer *cmdbuf = container_of(
          vk_submit->command_buffers[i], struct panvk_cmd_buffer, vk);
+
+      if (UINT64_MAX - submit->tiler_work_estimate <
+          cmdbuf->state.tiler_work_estimate)
+         submit->tiler_work_estimate = UINT64_MAX;
+      else
+         submit->tiler_work_estimate += cmdbuf->state.tiler_work_estimate;
 
       for (uint32_t j = 0; j < ARRAY_SIZE(cmdbuf->state.cs); j++) {
          struct cs_builder *b = panvk_get_cs_builder(cmdbuf, j);
@@ -2576,9 +2597,20 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
    const uint32_t graphics_mask =
       BITFIELD_BIT(PANVK_SUBQUEUE_VERTEX_TILER) |
       BITFIELD_BIT(PANVK_SUBQUEUE_FRAGMENT);
+   if (touched & graphics_mask) {
+      queue->kbase_tiler_submit_count++;
+      if (UINT64_MAX - queue->kbase_tiler_work_count <
+          submit->tiler_work_estimate)
+         queue->kbase_tiler_work_count = UINT64_MAX;
+      else
+         queue->kbase_tiler_work_count += submit->tiler_work_estimate;
+   }
+
+   uint64_t renew_work = kbase_tiler_heap_renew_work();
    if ((touched & graphics_mask) &&
-       ++queue->kbase_tiler_submit_count >=
-          kbase_tiler_heap_renew_interval()) {
+       (queue->kbase_tiler_submit_count >=
+           kbase_tiler_heap_renew_interval() ||
+        (renew_work && queue->kbase_tiler_work_count >= renew_work))) {
       result = kbase_wait_sync_targets(queue, submit->kbase_target_seqnos,
                                        UINT64_MAX);
       if (result != VK_SUCCESS)
@@ -2590,6 +2622,7 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
                                   "kbase: tiler heap renewal failed");
 
       queue->kbase_tiler_submit_count = 0;
+      queue->kbase_tiler_work_count = 0;
    }
 
    return VK_SUCCESS;

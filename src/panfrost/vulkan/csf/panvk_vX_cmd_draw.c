@@ -2728,6 +2728,15 @@ launch_xfb(struct panvk_cmd_buffer *cmdbuf,
 }
 
 static void
+account_tiler_work(struct panvk_cmd_buffer *cmdbuf, uint64_t work)
+{
+   if (UINT64_MAX - cmdbuf->state.tiler_work_estimate < work)
+      cmdbuf->state.tiler_work_estimate = UINT64_MAX;
+   else
+      cmdbuf->state.tiler_work_estimate += work;
+}
+
+static void
 panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
 {
    const struct cs_tracing_ctx *tracing_ctx =
@@ -2741,6 +2750,9 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_info *draw)
    /* If there's no vertex shader, we can skip the draw. */
    if (!panvk_priv_mem_check_alloc(vs->spd))
       return;
+
+   account_tiler_work(cmdbuf,
+                      (uint64_t)draw->vertex.count * draw->instance.count);
 
    /* Needs to be done before get_fs() is called because it depends on
     * fs.required being initialized. */
@@ -2922,6 +2934,11 @@ panvk_cmd_draw_indirect(struct panvk_cmd_buffer *cmdbuf,
    /* If there's no vertex shader, we can skip the draw. */
    if (!panvk_priv_mem_check_alloc(vs->spd))
       return;
+
+   /* The indirect buffer's vertex counts are GPU data and unavailable while
+    * recording.  Weight each possible draw as a modest mesh so multi-draw
+    * chunk renderers still trigger a per-frame renewal. */
+   account_tiler_work(cmdbuf, (uint64_t)draw->indirect.draw_count * 256);
 
    /* Needs to be done before get_fs() is called because it depends on
     * fs.required being initialized. */
