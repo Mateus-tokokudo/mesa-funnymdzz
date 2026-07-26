@@ -1932,14 +1932,6 @@ init_tiler(struct panvk_gpu_queue *queue)
       tiler_heap->context.handle = 0;
       tiler_heap->context.dev_addr = heap_ctx_va;
       first_heap_chunk = first_chunk_va;
-
-      mesa_logi("kbase: tiler heap ctx 0x%" PRIx64
-                ", first chunk 0x%" PRIx64
-                ", chunk size %u, initial %u, max %u, target %u, mem group %u",
-                heap_ctx_va, first_chunk_va, tiler_heap->chunk_size,
-                phys_dev->csf.tiler.initial_chunks,
-                tiler_heap_max_chunks, 65535,
-                tiler_heap_mem_group);
    } else
 #endif
    {
@@ -2099,10 +2091,6 @@ kbase_renew_tiler_heap(struct panvk_gpu_queue *queue)
       queue->subqueues[PANVK_SUBQUEUE_VERTEX_TILER].kbase.emitted_jobs;
    queue->kbase_retired_heap.frag_jobs =
       queue->subqueues[PANVK_SUBQUEUE_FRAGMENT].kbase.emitted_jobs;
-
-   mesa_logi("kbase: renewed tiler heap 0x%" PRIx64 " -> 0x%" PRIx64
-             ", first chunk 0x%" PRIx64 " (old ctx retired)",
-             old_ctx, new_ctx, first_chunk);
    return VK_SUCCESS;
 }
 #endif
