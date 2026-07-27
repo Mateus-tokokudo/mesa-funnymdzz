@@ -1356,5 +1356,12 @@ panvk_per_arch(get_physical_device_properties)(
    if (PANVK_DEBUG(STARTUP)) {
       mesa_logi("%s (%s) %s", properties->driverName, properties->deviceName,
                 properties->driverInfo);
+      mesa_logi("panvk: gpu_id=0x%" PRIx64 " variant=0x%x "
+                "texture_features0=0x%08x afbc=%u afrc=%u",
+                device->kmod.dev->props.gpu_id,
+                device->kmod.dev->props.gpu_variant,
+                device->kmod.dev->props.texture_features[0],
+                pan_query_afbc(&device->kmod.dev->props),
+                pan_query_afrc(&device->kmod.dev->props));
    }
 }

@@ -75,7 +75,7 @@
  * frames within the heap limit without draining the queues after every small
  * vkmark/vkcube frame. */
 #define KBASE_TILER_HEAP_RENEW_INTERVAL 128
-#define KBASE_TILER_HEAP_RENEW_WORK 4096
+#define KBASE_TILER_HEAP_RENEW_WORK 65536
 
 /* Diagnostic override for the tiler-heap renewal cadence.
  * PANVK_KBASE_HEAP_RENEW_INTERVAL=0 disables renewal entirely; any positive
