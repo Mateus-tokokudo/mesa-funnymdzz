@@ -74,7 +74,7 @@
  * force renewal after the current submission.  This keeps Minecraft's large
  * frames within the heap limit without draining the queues after every small
  * vkmark/vkcube frame. */
-#define KBASE_TILER_HEAP_RENEW_INTERVAL 8
+#define KBASE_TILER_HEAP_RENEW_INTERVAL 128
 #define KBASE_TILER_HEAP_RENEW_WORK 4096
 
 /* Diagnostic override for the tiler-heap renewal cadence.
@@ -725,6 +725,7 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                             KBASE_SEQNO_STREAM_PROGRESS_OFFSET);
    const uint8_t *output_page = (uint8_t *)subq->kbase.user_io + 8192;
    uint64_t target_insert = subq->kbase.insert;
+   uint64_t seqno_addr = kbase_subqueue_seqno_dev_addr(queue, subqueue);
    int64_t start = os_time_get_nano();
    int64_t last_kick = start;
    uint64_t watchdog = (uint64_t)start + KBASE_WAIT_TIMEOUT_NS;
@@ -847,7 +848,13 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                              ? MIN2(deadline - (uint64_t)now,
                                     20ull * 1000000ull)
                              : 0;
-      kbase_kmod_csf_wait_event(dev->kmod.dev, remaining);
+      int cqs_ret = target_seqno
+                       ? kbase_kmod_csf_wait_cqs64(
+                            dev->kmod.dev, seqno_addr, target_seqno - 1,
+                            remaining)
+                       : -1;
+      if (cqs_ret < 0)
+         kbase_kmod_csf_wait_event(dev->kmod.dev, remaining);
    }
 
    mesa_logd("kbase: completed subqueue %u job %" PRIu64
@@ -2541,6 +2548,29 @@ kbase_wait_sync_targets(
    return VK_SUCCESS;
 }
 
+static VkResult
+kbase_wait_graphics_targets(
+   struct panvk_gpu_queue *queue,
+   const uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT],
+   uint64_t abs_timeout_ns)
+{
+   const uint32_t graphics_mask =
+      BITFIELD_BIT(PANVK_SUBQUEUE_VERTEX_TILER) |
+      BITFIELD_BIT(PANVK_SUBQUEUE_FRAGMENT);
+
+   u_foreach_bit(i, graphics_mask) {
+      if (!targets[i])
+         continue;
+
+      VkResult result = kbase_subqueue_wait_seqno(
+         queue, i, targets[i], graphics_mask, false, abs_timeout_ns);
+      if (result != VK_SUCCESS)
+         return result;
+   }
+
+   return VK_SUCCESS;
+}
+
 /* Incoming CPU syncs are resolved before emission.  The new work itself is
  * only published here; completion is represented by the seqno snapshot and
  * consumed later by fence/semaphore waits. */
@@ -2611,8 +2641,11 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
        (queue->kbase_tiler_submit_count >=
            kbase_tiler_heap_renew_interval() ||
         (renew_work && queue->kbase_tiler_work_count >= renew_work))) {
-      result = kbase_wait_sync_targets(queue, submit->kbase_target_seqnos,
-                                       UINT64_MAX);
+      /* Heap generations are referenced only by graphics streams.  Preserve
+       * overlap with unrelated compute work instead of draining every
+       * subqueue before replacing the tiler heap. */
+      result = kbase_wait_graphics_targets(
+         queue, submit->kbase_target_seqnos, UINT64_MAX);
       if (result != VK_SUCCESS)
          return result;
 

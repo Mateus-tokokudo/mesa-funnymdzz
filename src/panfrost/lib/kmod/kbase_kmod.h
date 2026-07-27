@@ -59,6 +59,15 @@ int kbase_kmod_csf_queue_kick(struct pan_kmod_dev *dev, uint64_t ringbuf_va);
  * Returns 0 on success (event consumed or timeout), -1 on error. */
 int kbase_kmod_csf_wait_event(struct pan_kmod_dev *dev, int64_t timeout_ns);
 
+/* Wait for a 64-bit CSF event object to become greater than target_minus_one
+ * using a kernel CPU queue and a sync_file fence.  The event address must
+ * refer to a 16-byte-aligned BASE_MEM_CSF_EVENT allocation.  Returns 1 when
+ * satisfied, 0 on timeout, and -1 when the path is unavailable so callers can
+ * retain their notification/read fallback. */
+int kbase_kmod_csf_wait_cqs64(struct pan_kmod_dev *dev, uint64_t addr,
+                              uint64_t target_minus_one,
+                              int64_t timeout_ns);
+
 /* Report whether this kbase context has seen a queue-group error.  The error
  * state is latched while completion waits consume the notification stream. */
 bool kbase_kmod_csf_has_error(const struct pan_kmod_dev *dev);

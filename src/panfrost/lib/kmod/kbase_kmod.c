@@ -96,6 +96,18 @@ struct kbase_kmod_dev {
     * Vulkan queue status queries use this latch instead of invalidating and
     * reading every GPU subqueue context on every submission. */
    uint32_t csf_error;
+
+   /* A persistent kernel CPU queue turns GPU timeline writes into pollable
+    * sync_file fences.  At most one CQS wait is pending on this queue. */
+   struct {
+      simple_mtx_t lock;
+      base_kcpu_queue_id id;
+      bool valid;
+      bool pending;
+      uint64_t addr;
+      uint64_t target_minus_one;
+      int fence_fd;
+   } kcpu;
 };
 
 struct kbase_kmod_vm {
@@ -793,6 +805,170 @@ kbase_kmod_csf_wait_event(struct pan_kmod_dev *dev, int64_t timeout_ns)
    return 0;
 }
 
+static int
+kbase_kcpu_poll_fence(int fd, int64_t timeout_ns)
+{
+   struct pollfd pfd = {
+      .fd = fd,
+      .events = POLLIN,
+   };
+   struct timespec ts = {
+      .tv_sec = timeout_ns / 1000000000,
+      .tv_nsec = timeout_ns % 1000000000,
+   };
+
+   int ret;
+   do {
+      ret = ppoll(&pfd, 1, &ts, NULL);
+   } while (ret < 0 && errno == EINTR);
+
+   if (ret <= 0)
+      return ret;
+
+   /* sync_file reports a signalled fence through POLLIN.  POLLERR/HUP also
+    * retires the KCPU command; the caller reads the adjacent CQS error word
+    * before accepting queue completion. */
+   return pfd.revents & (POLLIN | POLLERR | POLLHUP) ? 1 : -1;
+}
+
+int
+kbase_kmod_csf_wait_cqs64(struct pan_kmod_dev *dev, uint64_t addr,
+                           uint64_t target_minus_one, int64_t timeout_ns)
+{
+   struct kbase_kmod_dev *kbase_dev =
+      container_of(dev, struct kbase_kmod_dev, base);
+   int ret = -1;
+
+   STATIC_ASSERT(sizeof(struct base_fence) == 8);
+   STATIC_ASSERT(sizeof(struct base_cqs_wait_operation_info) == 24);
+   STATIC_ASSERT(sizeof(struct base_kcpu_command) == 24);
+
+   if (!kbase_dev->is_csf || (addr & 15))
+      return -1;
+
+   simple_mtx_lock(&kbase_dev->kcpu.lock);
+   if (!kbase_dev->kcpu.valid)
+      goto out;
+
+   /* Reap an earlier wait first.  Normally it belongs to this same caller:
+    * keeping it queued across a 20 ms userspace watchdog slice avoids
+    * repeatedly creating fences for a long GPU job. */
+   if (kbase_dev->kcpu.pending) {
+      ret = kbase_kcpu_poll_fence(kbase_dev->kcpu.fence_fd, 0);
+      if (ret == 1) {
+         bool matches = kbase_dev->kcpu.addr == addr &&
+                        kbase_dev->kcpu.target_minus_one == target_minus_one;
+         close(kbase_dev->kcpu.fence_fd);
+         kbase_dev->kcpu.fence_fd = -1;
+         kbase_dev->kcpu.pending = false;
+         if (matches)
+            goto out;
+      } else if (ret < 0) {
+         mesa_logw("kbase: KCPU sync fence poll failed: %s", strerror(errno));
+         goto disable;
+      } else if (kbase_dev->kcpu.addr != addr ||
+                 kbase_dev->kcpu.target_minus_one != target_minus_one) {
+         /* One device context may back multiple Vulkan queues.  Do not put a
+          * different wait behind the outstanding one: its caller can use the
+          * existing CSF-notification fallback without head-of-line blocking. */
+         ret = -1;
+         goto out;
+      } else {
+         ret = kbase_kcpu_poll_fence(kbase_dev->kcpu.fence_fd, timeout_ns);
+         if (ret == 1) {
+            close(kbase_dev->kcpu.fence_fd);
+            kbase_dev->kcpu.fence_fd = -1;
+            kbase_dev->kcpu.pending = false;
+         }
+         goto out;
+      }
+   }
+
+   struct base_cqs_wait_operation_info wait = {
+      .addr = addr,
+      .val = target_minus_one,
+      .operation = BASEP_CQS_WAIT_OPERATION_GT,
+      .data_type = BASEP_CQS_DATA_TYPE_U64,
+   };
+   struct base_fence fence = {
+      .basep = {
+         .fd = -1,
+         .stream_fd = -1,
+      },
+   };
+   struct base_kcpu_command commands[2] = {
+      {
+         .type = BASE_KCPU_COMMAND_TYPE_CQS_WAIT_OPERATION,
+         .info.cqs_wait_operation = {
+            .objs = (uintptr_t)&wait,
+            .nr_objs = 1,
+         },
+      },
+      {
+         .type = BASE_KCPU_COMMAND_TYPE_FENCE_SIGNAL,
+         .info.fence = {
+            .fence = (uintptr_t)&fence,
+         },
+      },
+   };
+   struct kbase_ioctl_kcpu_queue_enqueue enqueue_wait = {
+      .addr = (uintptr_t)&commands[0],
+      .nr_commands = 1,
+      .id = kbase_dev->kcpu.id,
+   };
+   struct kbase_ioctl_kcpu_queue_enqueue enqueue_fence = {
+      .addr = (uintptr_t)&commands[1],
+      .nr_commands = 1,
+      .id = kbase_dev->kcpu.id,
+   };
+
+   /* The public ioctl envelope has a command count, but shipping kbase
+    * implementations require exactly one command per enqueue.  Put the
+    * fence behind the CQS wait with a second ioctl. */
+   if (ioctl(dev->fd, KBASE_IOCTL_KCPU_QUEUE_ENQUEUE, &enqueue_wait) ||
+       ioctl(dev->fd, KBASE_IOCTL_KCPU_QUEUE_ENQUEUE, &enqueue_fence) ||
+       fence.basep.fd < 0) {
+      mesa_logd("kbase: KCPU CQS wait unavailable: %s",
+                fence.basep.fd < 0 && errno == 0 ? "no sync fence" :
+                                                  strerror(errno));
+      goto disable;
+   }
+
+   kbase_dev->kcpu.pending = true;
+   kbase_dev->kcpu.addr = addr;
+   kbase_dev->kcpu.target_minus_one = target_minus_one;
+   kbase_dev->kcpu.fence_fd = fence.basep.fd;
+
+   ret = kbase_kcpu_poll_fence(fence.basep.fd, timeout_ns);
+   if (ret == 1) {
+      close(kbase_dev->kcpu.fence_fd);
+      kbase_dev->kcpu.fence_fd = -1;
+      kbase_dev->kcpu.pending = false;
+   } else if (ret < 0) {
+      goto disable;
+   }
+   goto out;
+
+disable:
+   if (kbase_dev->kcpu.fence_fd >= 0) {
+      close(kbase_dev->kcpu.fence_fd);
+      kbase_dev->kcpu.fence_fd = -1;
+   }
+   kbase_dev->kcpu.pending = false;
+   if (kbase_dev->kcpu.valid) {
+      struct kbase_ioctl_kcpu_queue_delete delete = {
+         .id = kbase_dev->kcpu.id,
+      };
+      ioctl(dev->fd, KBASE_IOCTL_KCPU_QUEUE_DELETE, &delete);
+      kbase_dev->kcpu.valid = false;
+   }
+   ret = -1;
+
+out:
+   simple_mtx_unlock(&kbase_dev->kcpu.lock);
+   return ret;
+}
+
 bool
 kbase_kmod_csf_has_error(const struct pan_kmod_dev *dev)
 {
@@ -1034,13 +1210,14 @@ kbase_kmod_dev_create(int fd, uint32_t flags,
    };
 
    /* kbase traditionally routes cached BO synchronization through
-    * KBASE_IOCTL_MEM_SYNC.  On AArch64, the generic kmod layer can instead
-    * issue the architected DC CVAC/CIVAC operations directly and batch one
-    * barrier per submit.  Keep the ioctl path as the conservative default,
-    * but allow devices with coherent GPU outer-cache behavior to opt into the
-    * lower-overhead userspace path for benchmarking and tuning. */
+    * KBASE_IOCTL_MEM_SYNC.  When the architecture exposes userspace cache
+    * maintenance, the generic kmod layer issues the same range operations
+    * directly and batches one barrier per submit.  This removes dozens of
+    * ioctls per second on G710.  PANVK_KBASE_USER_CACHE_SYNC=0 keeps the
+    * kernel path as a compatibility override; architectures without cache
+    * ops fall back automatically. */
    const char *user_cache_sync = getenv("PANVK_KBASE_USER_CACHE_SYNC");
-   if (!user_cache_sync || strcmp(user_cache_sync, "1"))
+   if (user_cache_sync && !strcmp(user_cache_sync, "0"))
       flags |= PAN_KMOD_DEV_FLAG_MMAP_SYNC_THROUGH_KERNEL;
 
    pan_kmod_dev_init(&kbase_dev->base, fd, flags, &kbase_drv,
@@ -1050,6 +1227,8 @@ kbase_kmod_dev_create(int fd, uint32_t flags,
    kbase_dev->tracking_page = tracking_page;
    kbase_dev->next_handle = 1;
    kbase_dev->dma_heap_fd = -1;
+   kbase_dev->kcpu.fence_fd = -1;
+   simple_mtx_init(&kbase_dev->kcpu.lock, mtx_plain);
 
    if (is_csf && kbase_query_csif_info(fd, &kbase_dev->csif_info)) {
       mesa_loge("kbase: failed to query the CSF global interface");
@@ -1057,6 +1236,7 @@ kbase_kmod_dev_create(int fd, uint32_t flags,
       munmap(tracking_page, 4096);
       kbase_dev->base.flags &= ~PAN_KMOD_DEV_FLAG_OWNS_FD;
       pan_kmod_dev_cleanup(&kbase_dev->base);
+      simple_mtx_destroy(&kbase_dev->kcpu.lock);
       pan_kmod_free(allocator, kbase_dev);
       return NULL;
    }
@@ -1096,8 +1276,26 @@ kbase_kmod_dev_create(int fd, uint32_t flags,
        * NULL return), so don't let pan_kmod_dev_cleanup() close it too. */
       kbase_dev->base.flags &= ~PAN_KMOD_DEV_FLAG_OWNS_FD;
       pan_kmod_dev_cleanup(&kbase_dev->base);
+      simple_mtx_destroy(&kbase_dev->kcpu.lock);
       pan_kmod_free(allocator, kbase_dev);
       return NULL;
+   }
+
+   const char *kcpu_sync = getenv("PANVK_KBASE_KCPU_SYNC");
+   /* Keep this path opt-in for now.  A KCPU CQS wait needs two enqueue
+    * ioctls (shipping kernels accept one command per enqueue), which is a
+    * net loss for the sub-millisecond waits common in lightweight scenes.
+    * It remains useful for profiling long waits and as the building block
+    * for future async WSI fence export. */
+   if (is_csf && kcpu_sync && !strcmp(kcpu_sync, "1")) {
+      struct kbase_ioctl_kcpu_queue_new create = { 0 };
+      if (!ioctl(fd, KBASE_IOCTL_KCPU_QUEUE_CREATE, &create)) {
+         kbase_dev->kcpu.id = create.id;
+         kbase_dev->kcpu.valid = true;
+         mesa_logd("kbase: created KCPU queue %u", create.id);
+      } else {
+         mesa_logd("kbase: KCPU queue unavailable: %s", strerror(errno));
+      }
    }
 
    return &kbase_dev->base;
@@ -1112,6 +1310,18 @@ kbase_kmod_dev_destroy(struct pan_kmod_dev *dev)
 {
    struct kbase_kmod_dev *kbase_dev =
       container_of(dev, struct kbase_kmod_dev, base);
+
+   simple_mtx_lock(&kbase_dev->kcpu.lock);
+   if (kbase_dev->kcpu.fence_fd >= 0)
+      close(kbase_dev->kcpu.fence_fd);
+   if (kbase_dev->kcpu.valid) {
+      struct kbase_ioctl_kcpu_queue_delete delete = {
+         .id = kbase_dev->kcpu.id,
+      };
+      ioctl(dev->fd, KBASE_IOCTL_KCPU_QUEUE_DELETE, &delete);
+   }
+   simple_mtx_unlock(&kbase_dev->kcpu.lock);
+   simple_mtx_destroy(&kbase_dev->kcpu.lock);
 
    if (kbase_dev->user_reg_page)
       munmap(kbase_dev->user_reg_page, 4096);

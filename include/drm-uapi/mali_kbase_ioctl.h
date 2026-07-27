@@ -495,6 +495,65 @@ struct kbase_ioctl_cs_queue_group_term {
 
 typedef __u8 base_kcpu_queue_id;
 
+/* Kernel CPU queue commands.  These definitions mirror the public CSF
+ * mali_base_csf_kernel.h ABI.  Keep the explicit padding: the kernel copies
+ * an array of these objects directly from userspace. */
+enum base_kcpu_command_type {
+   BASE_KCPU_COMMAND_TYPE_FENCE_SIGNAL = 0,
+   BASE_KCPU_COMMAND_TYPE_FENCE_WAIT = 1,
+   BASE_KCPU_COMMAND_TYPE_CQS_WAIT = 2,
+   BASE_KCPU_COMMAND_TYPE_CQS_SET = 3,
+   BASE_KCPU_COMMAND_TYPE_CQS_WAIT_OPERATION = 4,
+   BASE_KCPU_COMMAND_TYPE_CQS_SET_OPERATION = 5,
+   BASE_KCPU_COMMAND_TYPE_MAP_IMPORT = 6,
+   BASE_KCPU_COMMAND_TYPE_UNMAP_IMPORT = 7,
+   BASE_KCPU_COMMAND_TYPE_UNMAP_IMPORT_FORCE = 8,
+   BASE_KCPU_COMMAND_TYPE_JIT_ALLOC = 9,
+   BASE_KCPU_COMMAND_TYPE_JIT_FREE = 10,
+   BASE_KCPU_COMMAND_TYPE_GROUP_SUSPEND = 11,
+   BASE_KCPU_COMMAND_TYPE_ERROR_BARRIER = 12,
+};
+
+#define BASEP_CQS_WAIT_OPERATION_LE 0
+#define BASEP_CQS_WAIT_OPERATION_GT 1
+#define BASEP_CQS_DATA_TYPE_U32 0
+#define BASEP_CQS_DATA_TYPE_U64 1
+
+struct base_fence {
+   struct {
+      __s32 fd;
+      __s32 stream_fd;
+   } basep;
+};
+
+struct base_kcpu_command_fence_info {
+   __u64 fence;
+};
+
+struct base_cqs_wait_operation_info {
+   __u64 addr;
+   __u64 val;
+   __u8 operation;
+   __u8 data_type;
+   __u8 padding[6];
+};
+
+struct base_kcpu_command_cqs_wait_operation_info {
+   __u64 objs;
+   __u32 nr_objs;
+   __u32 inherit_err_flags;
+};
+
+struct base_kcpu_command {
+   __u8 type;
+   __u8 padding[7];
+   union {
+      struct base_kcpu_command_fence_info fence;
+      struct base_kcpu_command_cqs_wait_operation_info cqs_wait_operation;
+      __u64 padding[2];
+   } info;
+};
+
 struct kbase_ioctl_kcpu_queue_new {
    base_kcpu_queue_id id;
    __u8 padding[7];
