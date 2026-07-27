@@ -279,6 +279,14 @@ panvk_per_arch(EndCommandBuffer)(VkCommandBuffer commandBuffer)
    for (uint32_t i = 0; i < ARRAY_SIZE(cmdbuf->state.cs); i++) {
       struct cs_builder *b = &cmdbuf->state.cs[i].builder;
 
+      /* Builders are allocated lazily.  Don't turn an otherwise unused
+       * subqueue into a real submission just to append end-of-stream waits,
+       * cache maintenance and diagnostic breadcrumbs.  Besides the ring
+       * ioctl overhead, an unused stream used to execute a full L2/LSC clean
+       * on every command buffer. */
+      if (cs_is_empty(b))
+         continue;
+
       if (!cs_is_valid(b)) {
          vk_command_buffer_set_error(&cmdbuf->vk,
                                      VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -1005,8 +1013,6 @@ panvk_per_arch(BeginCommandBuffer)(VkCommandBuffer commandBuffer,
    }
 
    for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++) {
-      panvk_per_arch(kbase_mark_progress)(
-         cmdbuf, i, PANVK_KBASE_PROGRESS_CMDBUF_START);
       panvk_per_arch(panvk_instr_begin_work)(i, cmdbuf,
                                              PANVK_INSTR_WORK_TYPE_CMDBUF);
    }

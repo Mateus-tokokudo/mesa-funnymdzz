@@ -2627,7 +2627,11 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
    const uint32_t graphics_mask =
       BITFIELD_BIT(PANVK_SUBQUEUE_VERTEX_TILER) |
       BITFIELD_BIT(PANVK_SUBQUEUE_FRAGMENT);
-   if (touched & graphics_mask) {
+   /* Clear-only fragment submissions don't use the tiler heap.  Counting
+    * those towards renewal forces a graphics drain and heap replacement with
+    * no memory to reclaim.  All draw paths, including indirect and secondary
+    * command buffers, contribute a non-zero tiler work estimate. */
+   if ((touched & graphics_mask) && submit->tiler_work_estimate) {
       queue->kbase_tiler_submit_count++;
       if (UINT64_MAX - queue->kbase_tiler_work_count <
           submit->tiler_work_estimate)
@@ -2637,7 +2641,7 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
    }
 
    uint64_t renew_work = kbase_tiler_heap_renew_work();
-   if ((touched & graphics_mask) &&
+   if (submit->tiler_work_estimate &&
        (queue->kbase_tiler_submit_count >=
            kbase_tiler_heap_renew_interval() ||
         (renew_work && queue->kbase_tiler_work_count >= renew_work))) {
