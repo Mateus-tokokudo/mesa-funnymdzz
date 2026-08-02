@@ -184,19 +184,17 @@ nir_upsample(nir_builder *b, nir_def *hi, nir_def *lo)
 static nir_def *
 build_asin(nir_builder *b, nir_def *x, bool piecewise)
 {
-   if (x->bit_size == 16) {
-      /* The polynomial approximation may not be precise enough to meet half-float
-       * precision requirements. Alternatively, we could implement this using
-       * the formula:
-       *
-       * asin(x) = atan2(x, sqrt(1 - x*x))
-       *
-       * But that is very expensive, so instead we just do the polynomial
-       * approximation in 32-bit math and then we convert the result back to
-       * 16-bit.
-       */
-      return nir_f2f16(b, build_asin(b, nir_f2f32(b, x), piecewise));
-   }
+   /* The polynomial approximation may not be precise enough to meet half-float
+    * precision requirements. Alternatively, we could implement this using
+    * the formula:
+    *
+    * asin(x) = atan2(x, sqrt(1 - x*x))
+    *
+    * But that is very expensive, so instead we enforce the polynomial
+    * approximation in 32-bit math and then the caller can convert the result
+    * back to 16-bit.
+    */
+   assert(x->bit_size != 16);
    nir_def *abs_x = nir_fabs(b, x);
 
    nir_def *p0_plus_xp1 = nir_ffma_weak_imm12(b, abs_x, -0.0187293, 0.0742610);
@@ -230,6 +228,10 @@ build_asin(nir_builder *b, nir_def *x, bool piecewise)
 nir_def *
 nir_asin(nir_builder *b, nir_def *x)
 {
+   /* See build_asin for promotion explanation */
+   if (x->bit_size == 16)
+      return nir_f2f16(b, nir_asin(b, nir_f2f32(b, x)));
+
    /* use piecewise approximation to keep low relative error near 0 */
    return build_asin(b, x, true);
 }
@@ -237,6 +239,10 @@ nir_asin(nir_builder *b, nir_def *x)
 nir_def *
 nir_acos(nir_builder *b, nir_def *x)
 {
+   /* Promote acos in a similar fashion to asin to reduce error */
+   if (x->bit_size == 16)
+      return nir_f2f16(b, nir_acos(b, nir_f2f32(b, x)));
+
    /* piecewise approximation not needed to keep low relative error */
    return nir_fsub_imm(b, M_PI_2f, build_asin(b, x, false));
 }
@@ -296,6 +302,15 @@ nir_atan2(nir_builder *b, nir_def *y, nir_def *x)
 {
    assert(y->bit_size == x->bit_size);
    const uint32_t bit_size = x->bit_size;
+
+   /* For zero inputs, we end up with intermediate infinities from
+    * frcp(0.0). The final output is not infinity though, so this has to
+    * be well defined even when applications don't request preserving infinities
+    * on their own. Also preserve signed zeros to make the sign of the infinities
+    * well defined.
+    */
+   unsigned old_fp_math_ctrl = b->fp_math_ctrl;
+   b->fp_math_ctrl |= nir_fp_preserve_signed_zero | nir_fp_preserve_inf;
 
    nir_def *zero = nir_imm_floatN_t(b, 0, bit_size);
    nir_def *one = nir_imm_floatN_t(b, 1, bit_size);
@@ -370,8 +385,11 @@ nir_atan2(nir_builder *b, nir_def *y, nir_def *x)
     * continuous along the whole positive y = 0 half-line, so it won't affect
     * the result significantly.
     */
-   return nir_bcsel(b, nir_flt(b, nir_fmin(b, y, rcp_scaled_t), zero),
-                    nir_fneg(b, arc), arc);
+   nir_def *result = nir_bcsel(b, nir_flt(b, nir_fmin(b, y, rcp_scaled_t), zero),
+                               nir_fneg(b, arc), arc);
+
+   b->fp_math_ctrl = old_fp_math_ctrl;
+   return result;
 }
 
 nir_def *

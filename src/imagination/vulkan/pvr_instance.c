@@ -22,7 +22,8 @@
 #include "wsi_common.h"
 
 #include "util/build_id.h"
-#include "util/driconf.h"
+#include "util/os_misc.h"
+#include "pvr_drirc.h"
 
 #include "pvr_debug.h"
 #include "pvr_device.h"
@@ -31,12 +32,6 @@
 #include "pvr_physical_device.h"
 #include "pvr_winsys.h"
 #include "pvr_wsi.h"
-
-#if defined(VK_USE_PLATFORM_DISPLAY_KHR)
-#   define PVR_USE_WSI_PLATFORM_DISPLAY true
-#else
-#   define PVR_USE_WSI_PLATFORM_DISPLAY false
-#endif
 
 static const struct vk_instance_extension_table pvr_instance_extensions = {
    .KHR_device_group_creation = true,
@@ -48,6 +43,7 @@ static const struct vk_instance_extension_table pvr_instance_extensions = {
    .KHR_get_physical_device_properties2 = true,
    .KHR_get_surface_capabilities2 = PVR_USE_WSI_PLATFORM,
    .KHR_surface = PVR_USE_WSI_PLATFORM,
+   .KHR_surface_maintenance1 = PVR_USE_WSI_PLATFORM,
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
    .KHR_wayland_surface = true,
 #endif
@@ -57,11 +53,16 @@ static const struct vk_instance_extension_table pvr_instance_extensions = {
 #ifdef VK_USE_PLATFORM_XLIB_KHR
    .KHR_xlib_surface = true,
 #endif
+   .EXT_acquire_drm_display = PVR_USE_WSI_PLATFORM_DISPLAY,
    .EXT_debug_report = true,
    .EXT_debug_utils = true,
+   .EXT_direct_mode_display = PVR_USE_WSI_PLATFORM_DISPLAY,
+   .EXT_display_surface_counter = PVR_USE_WSI_PLATFORM_DISPLAY,
 #ifndef VK_USE_PLATFORM_WIN32_KHR
    .EXT_headless_surface = PVR_USE_WSI_PLATFORM,
 #endif
+   .EXT_surface_maintenance1 = PVR_USE_WSI_PLATFORM,
+   .EXT_swapchain_colorspace = PVR_USE_WSI_PLATFORM,
 };
 
 static VkResult pvr_get_drm_devices(void *const obj,
@@ -321,42 +322,16 @@ pvr_get_driver_build_sha(struct pvr_instance *instance)
    return true;
 }
 
-/* clang-format off */
-static const driOptionDescription pvr_dri_options[] = {
-   DRI_CONF_SECTION_PERFORMANCE
-      DRI_CONF_ADAPTIVE_SYNC(true)
-      DRI_CONF_VK_X11_OVERRIDE_MIN_IMAGE_COUNT(0)
-      DRI_CONF_VK_X11_STRICT_IMAGE_COUNT(false)
-      DRI_CONF_VK_X11_ENSURE_MIN_IMAGE_COUNT(false)
-      DRI_CONF_VK_XWAYLAND_WAIT_READY(false)
-   DRI_CONF_SECTION_END
-
-   DRI_CONF_SECTION_DEBUG
-      DRI_CONF_FORCE_VK_VENDOR()
-      DRI_CONF_VK_WSI_DISABLE_UNORDERED_SUBMITS(false)
-      DRI_CONF_VK_WSI_FORCE_BGRA8_UNORM_FIRST(false)
-      DRI_CONF_VK_WSI_FORCE_SWAPCHAIN_TO_CURRENT_EXTENT(false)
-      DRI_CONF_VK_X11_IGNORE_SUBOPTIMAL(false)
-   DRI_CONF_SECTION_END
-};
-/* clang-format on */
-
 static void pvr_init_dri_options(struct pvr_instance *instance)
 {
-   driParseOptionInfo(&instance->available_dri_options,
-                      pvr_dri_options,
-                      ARRAY_SIZE(pvr_dri_options));
-   driParseConfigFiles(&instance->dri_options, &instance->available_dri_options,
-                       &(driConfigFileParseParams) {
-                          .driverName = "pvr",
-                          .applicationName = instance->vk.app_info.app_name,
-                          .applicationVersion = instance->vk.app_info.app_version,
-                          .engineName = instance->vk.app_info.engine_name,
-                          .engineVersion = instance->vk.app_info.engine_version,
-                       });
-
-   instance->force_vk_vendor =
-      driQueryOptioni(&instance->dri_options, "force_vk_vendor");
+   pvr_parse_dri_options(&instance->drirc,
+                         &(driConfigFileParseParams) {
+                            .driverName = "pvr",
+                            .applicationName = instance->vk.app_info.app_name,
+                            .applicationVersion = instance->vk.app_info.app_version,
+                            .engineName = instance->vk.app_info.engine_name,
+                            .engineVersion = instance->vk.app_info.engine_version,
+                         });
 }
 
 VkResult pvr_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
@@ -417,8 +392,8 @@ VkResult pvr_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    return VK_SUCCESS;
 
 err_free_instance:
-   driDestroyOptionCache(&instance->dri_options);
-   driDestroyOptionInfo(&instance->available_dri_options);
+   driDestroyOptionCache(&instance->drirc.options);
+   driDestroyOptionInfo(&instance->drirc.available_options);
    vk_free(pAllocator, instance);
    return result;
 }
@@ -433,8 +408,8 @@ void pvr_DestroyInstance(VkInstance _instance,
 
    VG(VALGRIND_DESTROY_MEMPOOL(instance));
 
-   driDestroyOptionCache(&instance->dri_options);
-   driDestroyOptionInfo(&instance->available_dri_options);
+   driDestroyOptionCache(&instance->drirc.options);
+   driDestroyOptionInfo(&instance->drirc.available_options);
 
    vk_instance_finish(&instance->vk);
    vk_free(&instance->vk.alloc, instance);

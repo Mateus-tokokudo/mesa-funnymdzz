@@ -326,9 +326,9 @@
    DRI_CONF_OPT_B(ignore_map_unsynchronized, def, \
                   "Ignore GL_MAP_UNSYNCHRONIZED_BIT, workaround for games that use it incorrectly")
 
-#define DRI_CONF_VK_LOWER_TERMINATE_TO_DISCARD(def) \
-   DRI_CONF_OPT_B(vk_lower_terminate_to_discard, def, \
-                  "Lower terminate to discard (which is implicitly demote)")
+#define DRI_CONF_ZERO_INVALIDATED_BUFFERS(def) \
+   DRI_CONF_OPT_B(zero_invalidated_buffers, def, \
+                  "Zero memory returned by glMapBufferRange with GL_MAP_INVALIDATE_*_BIT, workaround for games that rely on the undefined contents being zero")
 
 #define DRI_CONF_LIMIT_TRIG_INPUT_RANGE(def) \
    DRI_CONF_OPT_B(limit_trig_input_range, def, \
@@ -380,10 +380,6 @@
 #define DRI_CONF_INTEL_DISABLE_THREADED_CONTEXT(def) \
    DRI_CONF_OPT_B(intel_disable_threaded_context, def, "Disable threaded context")
 
-#define DRI_CONF_VK_REQUIRE_ASTC(def) \
-   DRI_CONF_OPT_B(vk_require_astc, def, \
-                  "Implement emulated ASTC on HW that does not support it")
-
 /**
  * \brief Image quality-related options
  */
@@ -417,38 +413,6 @@
 #define DRI_CONF_BLOCK_ON_DEPLETED_BUFFERS(def) \
    DRI_CONF_OPT_B(block_on_depleted_buffers, def, \
                   "Block clients using buffer backpressure until new buffer is available to reduce latency")
-
-#define DRI_CONF_VK_WSI_FORCE_BGRA8_UNORM_FIRST(def) \
-   DRI_CONF_OPT_B(vk_wsi_force_bgra8_unorm_first, def, \
-                  "Force vkGetPhysicalDeviceSurfaceFormatsKHR to return VK_FORMAT_B8G8R8A8_UNORM as the first format")
-
-#define DRI_CONF_VK_WSI_FORCE_SWAPCHAIN_TO_CURRENT_EXTENT(def) \
-   DRI_CONF_OPT_B(vk_wsi_force_swapchain_to_current_extent, def, \
-                  "Force VkSwapchainCreateInfoKHR::imageExtent to be VkSurfaceCapabilities2KHR::currentExtent")
-
-#define DRI_CONF_VK_WSI_DISABLE_UNORDERED_SUBMITS(def) \
-   DRI_CONF_OPT_B(vk_wsi_disable_unordered_submits, def, \
-                  "Disable unordered WSI submits to workaround application synchronization bugs")
-
-#define DRI_CONF_VK_X11_OVERRIDE_MIN_IMAGE_COUNT(def) \
-   DRI_CONF_OPT_I(vk_x11_override_min_image_count, def, 0, 999, \
-                  "Override the VkSurfaceCapabilitiesKHR::minImageCount (0 = no override)")
-
-#define DRI_CONF_VK_X11_STRICT_IMAGE_COUNT(def) \
-   DRI_CONF_OPT_B(vk_x11_strict_image_count, def, \
-                  "Force the X11 WSI to create exactly the number of image specified by the application in VkSwapchainCreateInfoKHR::minImageCount")
-
-#define DRI_CONF_VK_X11_ENSURE_MIN_IMAGE_COUNT(def) \
-   DRI_CONF_OPT_B(vk_x11_ensure_min_image_count, def, \
-                  "Force the X11 WSI to create at least the number of image specified by the driver in VkSurfaceCapabilitiesKHR::minImageCount")
-
-#define DRI_CONF_VK_X11_IGNORE_SUBOPTIMAL(def) \
-   DRI_CONF_OPT_B(vk_x11_ignore_suboptimal, def, \
-                  "Force the X11 WSI to never report VK_SUBOPTIMAL_KHR")
-
-#define DRI_CONF_VK_XWAYLAND_WAIT_READY(def) \
-   DRI_CONF_OPT_B(vk_xwayland_wait_ready, def, \
-                  "Wait for fences before submitting buffers to Xwayland")
 
 #define DRI_CONF_MESA_GLTHREAD_DRIVER(def) \
    DRI_CONF_OPT_B(mesa_glthread_driver, def, \
@@ -505,9 +469,9 @@
    DRI_CONF_OPT_B(vertex_program_default_out, def, \
                   "Initialize outputs of vertex program to a default value vec4(0, 0, 0, 1)")
 
-#define DRI_CONF_VK_ZERO_VRAM(def) \
-   DRI_CONF_OPT_B(vk_zero_vram, def, \
-                  "Initialize to zero all VRAM allocations")
+#define DRI_CONF_HEAP_MEMORY_PERCENT(def) \
+   DRI_CONF_OPT_F(heap_memory_percent, def, 0.0, 1.0, \
+                  "Percentage of total system memory to report as gpu heap memory (0 = driver default)")
 
 /**
  * \brief Initialization configuration options
@@ -588,135 +552,6 @@
    DRI_CONF_OPT_U64(pan_fragment_core_mask, def, 0, UINT64_MAX, \
                     "Bitmask of shader cores that may be used for fragment jobs. If unset, defaults to scheduling across all available cores.")
 
-#define DRI_CONF_PAN_ENABLE_VERTEX_PIPELINE_STORES_ATOMICS(def) \
-   DRI_CONF_OPT_B(pan_enable_vertex_pipeline_stores_atomics, def, \
-                  "Enable vertexPipelineStoresAndAtomics on v13+ (This cannot work on older generation because of speculative behaviors around vertices)")
-
-#define DRI_CONF_PAN_FORCE_ENABLE_SHADER_ATOMICS(def) \
-   DRI_CONF_OPT_B(pan_force_enable_shader_atomics, def, \
-                  "Enable fragmentStoresAndAtomics and vertexPipelineStoresAndAtomics on any architecture. (This may not work reliably and is for debug purposes only!)")
-
-/**
- * \brief Turnip specific configuration options
- */
-
-#define DRI_CONF_TU_DONT_RESERVE_DESCRIPTOR_SET(def) \
-   DRI_CONF_OPT_B(tu_dont_reserve_descriptor_set, def, \
-                  "Don't internally reserve one of the HW descriptor sets for descriptor set dynamic offset support, this frees up an extra descriptor set at the cost of that feature")
-
-#define DRI_CONF_TU_ALLOW_OOB_INDIRECT_UBO_LOADS(def) \
-   DRI_CONF_OPT_B(tu_allow_oob_indirect_ubo_loads, def, \
-                  "Some D3D11 games rely on out-of-bounds indirect UBO loads to return real values from underlying bound descriptor, this prevents us from lowering indirectly accessed UBOs to consts")
-
-#define DRI_CONF_TU_ENABLE_D24S8_BORDER_COLOR_WORKAROUND(def) \
-   DRI_CONF_OPT_B(tu_enable_d24s8_border_color_workaround, def, \
-                  "Disable UBWC for D24S8 images with VK_IMAGE_USAGE_SAMPLED_BIT when customBorderColorWithoutFormat is enabled")
-
-#define DRI_CONF_TU_ENABLE_FAST_BORDER_COLOR_FOR_UNDEFINED_FORMATS(def) \
-   DRI_CONF_OPT_B(tu_enable_fast_border_color_for_undefined_formats, def, \
-                  "Enables fast border color HW feature for VK_FORMAT_UNDEFINED sampler formats.")
-
-#define DRI_CONF_TU_USE_TEX_COORD_ROUND_NEAREST_EVEN_MODE(def) \
-   DRI_CONF_OPT_B(tu_use_tex_coord_round_nearest_even_mode, def, \
-                  "Use D3D-compliant round-to-nearest-even mode for texture coordinates")
-
-#define DRI_CONF_TU_IGNORE_FRAG_DEPTH_DIRECTION(def) \
-   DRI_CONF_OPT_B(tu_ignore_frag_depth_direction, def, \
-                  "Ignore direction specified for gl_FragDepth output")
-
-#define DRI_CONF_TU_ENABLE_SOFTFLOAT32(def) \
-   DRI_CONF_OPT_B(tu_enable_softfloat32, def, \
-                  "Enable softfloat emulation for float32 denormals")
-
-#define DRI_CONF_TU_EMULATE_ALPHA_TO_COVERAGE(def) \
-   DRI_CONF_OPT_B(tu_emulate_alpha_to_coverage, def, \
-                  "Enable emulation of alpha-to-coverage")
-
-#define DRI_CONF_TU_AUTOTUNE_ALGORITHM() \
-   DRI_CONF_OPT_S_NODEF(tu_autotune_algorithm, \
-                        "Set the preferred autotune algorithm")
-
-#define DRI_CONF_TU_OVERRIDE_UNCACHED_AS_CACHE_COHERENT(def) \
-   DRI_CONF_OPT_B(tu_override_uncached_as_cache_coherent, def, \
-                  "Replaces uncached-host allocations with cached-coherent-host when possible. Only useful under x86 emulation where memory accesses tend to be atomic")
-
-#define DRI_CONF_TU_ALLOW_CONCURRENT_BINNING(def) \
-   DRI_CONF_OPT_B(tu_allow_concurrent_binning, def, \
-                  "Allow concurrent binning on A7XX+, the CB is disabled by default because it regresses performance on desktop games")
-
-#define DRI_CONF_TU_RESTRICT_SUBGROUP_SIZE_64(def) \
-   DRI_CONF_OPT_B(tu_restrict_subgroup_size_64, def, \
-                  "Restrict subgroup size to 64 (instead of a max of 128) to work around games assuming desktop GPU 32/64 sizes")
-
-#define DRI_CONF_TU_DONT_CARE_AS_LOAD(def) \
-   DRI_CONF_OPT_B(tu_dont_care_as_load, def, \
-                  "Treat VK_ATTACHMENT_LOAD_OP_DONT_CARE as LOAD_OP_LOAD, workaround on tiler GPUs for games that confuse these two load ops")
-
-/**
- * \brief Honeykrisp specific configuration options
- */
-
-#define DRI_CONF_HK_DISABLE_BORDER_EMULATION(def) \
-   DRI_CONF_OPT_B(hk_disable_border_emulation, def, \
-                  "Disable custom border colour emulation")
-
-#define DRI_CONF_HK_FAKE_MINMAX(def) \
-   DRI_CONF_OPT_B(hk_fake_minmax, def, \
-                  "Fake support for min/max filtering")
-
-#define DRI_CONF_HK_IMAGE_VIEW_MIN_LOD(def) \
-   DRI_CONF_OPT_B(hk_image_view_min_lod, def, \
-                  "Emulate VK_EXT_image_view_min_lod (conformant but slower)")
-
-#define DRI_CONF_HK_ENABLE_VERTEX_PIPELINE_STORES_ATOMICS(def) \
-   DRI_CONF_OPT_B(hk_enable_vertex_pipeline_stores_atomics, def, \
-                  "Enable vertexPipelineStoresAndAtomics")
-
-/**
- * \brief venus specific configuration options
- */
-#define DRI_CONF_VENUS_IMPLICIT_FENCING(def) \
-   DRI_CONF_OPT_B(venus_implicit_fencing, def, \
-                  "Assume the virtio-gpu kernel driver supports implicit fencing")
-
-#define DRI_CONF_VENUS_WSI_MULTI_PLANE_MODIFIERS(def) \
-   DRI_CONF_OPT_B(venus_wsi_multi_plane_modifiers, def, \
-                  "Enable support of multi-plane format modifiers for wsi images")
-
-/**
- * \brief HASVK specific configuration options
- */
-
-#define DRI_CONF_HASVK_ASSUME_FULL_SUBGROUPS(def) \
-  DRI_CONF_OPT_I(anv_assume_full_subgroups, def, 0, 32, \
-                 "Allow assuming full subgroups requirement even when it's not specified explicitly and set the given size")
-
-#define DRI_CONF_HASVK_OVERRIDE_API_VERSION(def) \
-   DRI_CONF_OPT_B(hasvk_report_vk_1_3_version, def, \
-                  "Override intel_hasvk API version")
-
-#define DRI_CONF_HASVK_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(def) \
-   DRI_CONF_OPT_B(anv_sample_mask_out_opengl_behaviour, def, \
-                  "Ignore sample mask out when having single sampled target")
-
-/**
- * \brief DZN specific configuration options
- */
-
-#define DRI_CONF_DZN_CLAIM_WIDE_LINES(def) \
-   DRI_CONF_OPT_B(dzn_claim_wide_lines, def, "Claim wide line support")
-
-#define DRI_CONF_DZN_ENABLE_8BIT_LOADS_STORES(def) \
-   DRI_CONF_OPT_B(dzn_enable_8bit_loads_stores, def, "Enable VK_KHR_8bit_loads_stores")
-
-#define DRI_CONF_DZN_DISABLE(def) \
-   DRI_CONF_OPT_B(dzn_disable, def, "Fail instance creation")
-
-/**
- * \brief NVK specific configuration options
- */
-
- #define DRI_CONF_NVK_APP_LAYER() DRI_CONF_OPT_S_NODEF(nvk_app_layer, "Select an application layer.")
 
 /**
  * \brief Asahi specific configuration options

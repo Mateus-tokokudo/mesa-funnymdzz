@@ -5,15 +5,12 @@
 #include "anv_private.h"
 #include "anv_api_version.h"
 
-#include "util/driconf.h"
-
 static const struct debug_control debug_control[] = {
    { "bindless",                  ANV_DEBUG_BINDLESS},
    { "desc-dirty",                ANV_DEBUG_DESCRIPTOR_DIRTY},
    { "dgc-dump",                  ANV_DEBUG_DGC_DUMP},
    { "experimental",              ANV_DEBUG_EXPERIMENTAL},
    { "no-gpl",                    ANV_DEBUG_NO_GPL},
-   { "no-alloc-oversubscription", ANV_DEBUG_NO_ALLOC_OVER_SUBSCRIPTION},
    { "no-slab",                   ANV_DEBUG_NO_SLAB},
    { "no-sparse",                 ANV_DEBUG_NO_SPARSE},
    { "sparse-trtt",               ANV_DEBUG_SPARSE_TRTT},
@@ -22,6 +19,7 @@ static const struct debug_control debug_control[] = {
    { "shader-dump",               ANV_DEBUG_SHADER_DUMP},
    { "shader-hash",               ANV_DEBUG_SHADER_HASH},
    { "shader-print",              ANV_DEBUG_SHADER_PRINT},
+   { "skip-disk-cache",           ANV_DEBUG_SKIP_DISK_CACHE},
    { NULL,    0 }
 };
 
@@ -94,8 +92,60 @@ VkResult anv_EnumerateInstanceExtensionProperties(
 }
 
 static void
+anv_drirc_shader_cb(const void *hash_data,
+                    uint32_t hash_size,
+                    const driOptionInfo *option,
+                    const driOptionValue *value,
+                    void *shaderOptionCallbackData)
+{
+   /* Should always be 8 bytes or more. Our compiler prog_data only holds the
+    * first 64bits, so just use that for the hash table.
+    */
+   assert(hash_size >= 8);
+   uint64_t shader_hash = ((uint64_t *)hash_data)[0];
+
+   struct anv_instance *instance = shaderOptionCallbackData;
+
+   if (instance->shader_workarounds == NULL)
+      instance->shader_workarounds = _mesa_hash_table_u64_create(NULL);
+
+   struct anv_shader_workaround *workaround =
+      _mesa_hash_table_u64_search(instance->shader_workarounds, shader_hash);
+   if (workaround == NULL) {
+      workaround = vk_zalloc(&instance->vk.alloc,
+                             sizeof(*workaround), 8,
+                             VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+      if (workaround == NULL) {
+         instance->drirc_status = vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return;
+      }
+      _mesa_hash_table_u64_insert(instance->shader_workarounds,
+                                  shader_hash, workaround);
+   }
+
+   assert(workaround != NULL);
+
+   if (strcmp(option->name, "force_vk_typed_barrier_after_dispatch_to_compute") == 0)
+      workaround->force_typed_barrier_after_dispatch_to_compute = true;
+   else if (strcmp(option->name, "force_vk_untyped_barrier_after_dispatch_to_compute") == 0)
+      workaround->force_untyped_barrier_after_dispatch_to_compute = true;
+   else if (strcmp(option->name, "force_vk_typed_barrier_after_dispatch_to_top") == 0)
+      workaround->force_typed_barrier_after_dispatch_to_top = true;
+   else if (strcmp(option->name, "force_vk_untyped_barrier_after_dispatch_to_top") == 0)
+      workaround->force_untyped_barrier_after_dispatch_to_top = true;
+   else if (strcmp(option->name, "brw_prefer_simd32_fs") == 0)
+      workaround->prefer_simd32_fs = true;
+   else if (strcmp(option->name, "anv_xe2_force_simd32_cs") == 0)
+      workaround->force_xe2_simd32_cs = true;
+   else
+      UNREACHABLE("invalid shader option");
+}
+
+static VkResult
 anv_init_dri_options(struct anv_instance *instance)
 {
+   instance->drirc_status = VK_SUCCESS;
+
    anv_parse_dri_options(&instance->drirc,
                          &(driConfigFileParseParams) {
                             .driverName = "anv",
@@ -103,7 +153,12 @@ anv_init_dri_options(struct anv_instance *instance)
                             .applicationVersion = instance->vk.app_info.app_version,
                             .engineName = instance->vk.app_info.engine_name,
                             .engineVersion = instance->vk.app_info.engine_version,
+                            .shaderOptionCallback = anv_drirc_shader_cb,
+                            .shaderOptionCallbackData = instance,
                          });
+
+   if (instance->drirc_status != VK_SUCCESS)
+      return instance->drirc_status;
 
     if (instance->vk.app_info.engine_name &&
         !strcmp(instance->vk.app_info.engine_name, "DXVK")) {
@@ -157,6 +212,8 @@ anv_init_dri_options(struct anv_instance *instance)
        instance->drirc.perf.rt_dispatch_timeout = 512;
        break;
    }
+
+   return VK_SUCCESS;
 }
 
 VkResult anv_CreateInstance(
@@ -172,8 +229,8 @@ VkResult anv_CreateInstance(
    if (pAllocator == NULL)
       pAllocator = vk_default_allocator();
 
-   instance = vk_alloc(pAllocator, sizeof(*instance), 8,
-                       VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
+   instance = vk_zalloc(pAllocator, sizeof(*instance), 8,
+                        VK_SYSTEM_ALLOCATION_SCOPE_INSTANCE);
    if (!instance)
       return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
 
@@ -190,12 +247,14 @@ VkResult anv_CreateInstance(
       return vk_error(NULL, result);
    }
 
+   result = anv_init_dri_options(instance);
+   if (result != VK_SUCCESS)
+      goto fail_init;
+
    instance->vk.physical_devices.try_create_for_drm = anv_physical_device_try_create;
    instance->vk.physical_devices.destroy = anv_physical_device_destroy;
 
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
-
-   anv_init_dri_options(instance);
 
    static once_flag process_anv_debug_variable_flag = ONCE_FLAG_INIT;
    call_once(&process_anv_debug_variable_flag,
@@ -209,6 +268,12 @@ VkResult anv_CreateInstance(
    *pInstance = anv_instance_to_handle(instance);
 
    return VK_SUCCESS;
+
+ fail_init:
+   vk_instance_finish(&instance->vk);
+   vk_free(&instance->vk.alloc, instance);
+
+   return result;
 }
 
 void anv_DestroyInstance(
@@ -224,6 +289,12 @@ void anv_DestroyInstance(
 
    driDestroyOptionCache(&instance->drirc.options);
    driDestroyOptionInfo(&instance->drirc.available_options);
+
+   if (instance->shader_workarounds) {
+      hash_table_u64_foreach(instance->shader_workarounds, entry)
+         vk_free(&instance->vk.alloc, entry.data);
+      _mesa_hash_table_u64_destroy(instance->shader_workarounds);
+   }
 
    vk_instance_finish(&instance->vk);
    vk_free(&instance->vk.alloc, instance);

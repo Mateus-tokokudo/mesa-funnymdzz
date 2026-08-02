@@ -101,8 +101,8 @@ blorp_get_surface_base_address(struct blorp_batch *batch)
 {
    struct anv_cmd_buffer *cmd_buffer = batch->driver_batch;
    return (struct blorp_address) {
-      .buffer = cmd_buffer->device->internal_surface_state_pool.block_pool.bo,
-      .offset = -cmd_buffer->device->internal_surface_state_pool.start_offset,
+      .buffer = anv_device_get_internal_surface_state_pool(cmd_buffer->device)->block_pool.bo,
+      .offset = -anv_device_get_internal_surface_state_pool(cmd_buffer->device)->start_offset,
    };
 }
 #endif
@@ -353,8 +353,24 @@ blorp_exec_on_render(struct blorp_batch *batch,
 #endif
 
    if (params->depth.enabled &&
-       !(batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL))
-      genX(cmd_buffer_emit_gfx12_depth_wa)(cmd_buffer, &params->depth.surf);
+       !(batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL)) {
+      if (INTEL_NEEDS_WA_1808121037 && params->num_samples == 1 &&
+          params->depth.surf.format == ISL_FORMAT_R16_UNORM) {
+         /* Disable HiZ planes on D16 1x MSAA to avoid sporadic corruption. */
+         genX(cmd_buffer_disable_hiz_planes)(cmd_buffer);
+      }
+   }
+
+   if (params->depth.enabled &&
+       (batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL)) {
+      /* BLORP expects that the depth buffer aux usage matches the
+       * attachment's. Undo any temporary modification.
+       */
+      enum isl_aux_usage depth_aux_usage =
+         cmd_buffer->state.gfx.depth_att.aux_usage;
+      if (cmd_buffer->state.gfx.hiz_usage != depth_aux_usage)
+         genX(cmd_buffer_emit_depth_stencil)(cmd_buffer, depth_aux_usage);
+   }
 
    genX(flush_pipeline_select_3d)(cmd_buffer);
 

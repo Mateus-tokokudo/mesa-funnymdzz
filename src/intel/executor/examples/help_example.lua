@@ -1,18 +1,20 @@
 -- Example from the help message.
 
-local r = execute {
-  data={ [42] = 0x100 },
-  src=[[
-    @mov     g1      42
-    @read    g2      g1
+local buf = alloc({ [42] = 0x100 })
 
-    @id      g3
+execute [[
+    @param autoswsb
 
-    add(8)   g4<1>UD  g2<8,8,1>UD  g3<8,8,1>UD  { align1 @1 1Q };
+    @addr    r2      buf0 42
+    @load    r3      r2
 
-    @write   g3       g4
+    @id      r4
+    @addr    r5      buf0 r4
+
+    add (8)  r6      r3      r4
+
+    @store   r5      r6
     @eot
-  ]]
-}
+]]
 
-dump(r, 4)
+dump(buf, 4)

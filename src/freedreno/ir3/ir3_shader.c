@@ -113,7 +113,7 @@ ir3_const_add_imm(struct ir3_shader_variant *v, uint32_t imm)
    return ir3_const_imm_index_to_reg(const_state, imm_state->count++);
 }
 
-int
+unsigned
 ir3_glsl_type_size(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_attribute_slots(type, false);
@@ -604,6 +604,7 @@ create_variant(struct ir3_shader *shader, const struct ir3_shader_key *key,
 
    if (ir3_shader_compute(v)) {
       v->cs.force_linear_dispatch = shader->cs.force_linear_dispatch;
+      v->cs.round_robin_mode = shader->nir->info.occupancy_bounded_workgroup_fairness;
 
       v->local_size[0] = shader->nir->info.workgroup_size[0];
       v->local_size[1] = shader->nir->info.workgroup_size[1];
@@ -1013,6 +1014,8 @@ ir3_const_alloc_type_to_string(enum ir3_const_alloc_type type)
       return "dyn_descriptor_offset";
    case IR3_CONST_ALLOC_INLINE_UNIFORM_ADDRS:
       return "inline_uniform_addresses";
+   case IR3_CONST_ALLOC_BINDLESS_BASE_ADDRS:
+      return "bindless_base_addresses";
    case IR3_CONST_ALLOC_DRIVER_PARAMS:
       return "driver_params";
    case IR3_CONST_ALLOC_UBO_RANGES:

@@ -37,7 +37,7 @@
 #include "common/v3d_device_info.h"
 #include "wsi_common.h"
 #include "util/sparse_array.h"
-#include "util/xmlconfig.h"
+#include "v3dv_drirc.h"
 
 struct v3dv_event;
 struct v3dv_format;
@@ -116,16 +116,7 @@ struct v3dv_physical_device {
     */
    struct util_sparse_array bo_map;
 
-   struct {
-      bool merge_jobs;
-   } options;
-
-   struct {
-      bool cpu_queue;
-      bool multisync;
-      bool perfmon;
-   } caps;
-
+   bool merge_jobs;
    bool is_shim;
 };
 
@@ -147,6 +138,8 @@ void v3dv_meta_blit_finish(struct v3dv_device *device);
 void v3dv_meta_texel_buffer_copy_init(struct v3dv_device *device);
 void v3dv_meta_texel_buffer_copy_finish(struct v3dv_device *device);
 
+bool v3dv_webgpu_override_enabled(void);
+
 bool v3dv_meta_can_use_tlb(struct v3dv_image *image,
                            uint8_t plane,
                            uint8_t miplevel,
@@ -157,26 +150,20 @@ bool v3dv_meta_can_use_tlb(struct v3dv_image *image,
 struct v3dv_instance {
    struct vk_instance vk;
 
-   struct driOptionCache dri_options;
-   struct driOptionCache available_dri_options;
+   struct v3dv_drirc drirc;
 
    bool pipeline_cache_enabled;
    bool default_pipeline_cache_enabled;
    bool meta_cache_enabled;
+   /* A value of 0 means unlimited caching. */
+   uint32_t pipeline_cache_max_entries;
 };
 
-/* FIXME: In addition to tracking the last job submitted by GPU queue (cl, csd,
- * tfu), we still need a syncobj to track the last overall job submitted
- * (V3DV_QUEUE_ANY) for the case we don't support multisync. Someday we can
- * start expecting multisync to be present and drop the legacy implementation
- * together with this V3DV_QUEUE_ANY tracker.
- */
 enum v3dv_queue_type {
    V3DV_QUEUE_CL = 0,
    V3DV_QUEUE_CSD,
    V3DV_QUEUE_TFU,
    V3DV_QUEUE_CPU,
-   V3DV_QUEUE_ANY,
    V3DV_QUEUE_COUNT,
 };
 
@@ -186,17 +173,10 @@ enum v3dv_queue_type {
  * cmd buf batch.
  */
 struct v3dv_last_job_sync {
-   /* If the job is the first submitted to a GPU queue in a cmd buffer batch.
-    *
-    * We use V3DV_QUEUE_{CL,CSD,TFU} both with and without multisync.
-    */
+   /* If the job is the first submitted to a GPU queue in a cmd buffer batch. */
    bool first[V3DV_QUEUE_COUNT];
-   /* Array of syncobj to track the last job submitted to a GPU queue.
-    *
-    * With multisync we use V3DV_QUEUE_{CL,CSD,TFU} to track syncobjs for each
-    * queue, but without multisync we only track the last job submitted to any
-    * queue in V3DV_QUEUE_ANY.
-    */
+
+   /* Array of syncobj to track the last job submitted to a GPU queue. */
    uint32_t syncs[V3DV_QUEUE_COUNT];
 };
 
@@ -210,8 +190,6 @@ struct v3dv_queue {
 
 VkResult v3dv_queue_driver_submit(struct vk_queue *vk_queue,
                                   struct vk_queue_submit *submit);
-
-VkResult v3dv_device_create_noop_job(struct v3dv_device *device);
 
 #define V3DV_META_BLIT_CACHE_KEY_SIZE              (4 * sizeof(uint32_t))
 #define V3DV_META_TEXEL_BUFFER_COPY_CACHE_KEY_SIZE (3 * sizeof(uint32_t) + \
@@ -257,8 +235,6 @@ struct v3dv_device {
     * against concurrent access from multiple queues.
     */
    mtx_t queue_mutex;
-
-   struct v3dv_job *noop_job;
 
    /* The last active perfmon ID to prevent mixing of counter results when a
     * job is submitted with a different perfmon id.
@@ -317,6 +293,13 @@ struct v3dv_device {
 
    uint32_t bo_size;
    uint32_t bo_count;
+
+   /* Monotonically increasing id used to give VK_EXT_device_memory_report
+    * a memObjectId that stays unique across BO cache reuse, since the
+    * cache can hand back the same struct v3dv_bo (and thus the same
+    * kernel handle) for what is logically a new allocation.
+    */
+   uint32_t bo_report_id;
 
    /* Event handling resources.
     *
@@ -392,6 +375,11 @@ struct v3dv_device {
     * can be NULL.
     */
    struct v3dv_bo *default_attribute_float;
+
+   /* When nullDescriptor is enabled, this BO provides valid zeroed memory
+    * for null descriptor paths.
+    */
+   struct v3dv_bo *null_bo;
 
    void *device_address_mem_ctx;
    struct util_dynarray device_address_bo_list; /* Array of struct v3dv_bo * */

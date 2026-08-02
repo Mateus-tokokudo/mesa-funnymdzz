@@ -8,6 +8,8 @@
 
 #include "nir.h"
 
+#define MSL_MAX_SAMPLERS 4096
+
 enum pipe_format;
 
 struct nir_to_msl_options {
@@ -69,6 +71,8 @@ bool msl_nir_fs_remove_depth_write(nir_builder *b, nir_intrinsic_instr *intrin,
 
 bool msl_lower_textures(nir_shader *s);
 
+bool msl_lower_robustness2_images(nir_shader *s);
+
 bool msl_lower_static_sample_mask(nir_shader *nir, uint32_t sample_mask);
 bool msl_ensure_depth_write(nir_shader *nir);
 bool msl_ensure_vertex_position_output(nir_shader *nir);
@@ -79,6 +83,7 @@ bool msl_nir_fake_guard_for_discards(struct nir_shader *nir);
 bool msl_nir_lower_sample_shading(nir_shader *nir);
 void msl_nir_lower_clip_cull_distance(nir_shader *nir,
                                       unsigned num_cull_distances);
+bool msl_nir_lower_instance_id(nir_shader *nir);
 
 bool msl_gather_uses_per_draw_data(nir_shader *nir);
 
@@ -94,7 +99,6 @@ static const nir_shader_compiler_options kk_nir_options = {
    .lower_insert_byte = true,
    .lower_fmod = true,
    .discard_is_demote = true,
-   .instance_id_includes_base_index = true,
    .lower_device_index_to_zero = true,
    .lower_pack_64_2x32_split = true,
    .lower_unpack_64_2x32_split = true,

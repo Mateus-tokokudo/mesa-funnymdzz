@@ -5,11 +5,7 @@
  */
 
 #include <ctype.h>
-#include "compiler/nir/nir.h"
-#include "ac_nir.h"
-#include "ac_shader_util.h"
 #include "si_pipe.h"
-#include "util/u_cpu_detect.h"
 #include "util/u_screen.h"
 #include <sys/utsname.h>
 #include "drm-uapi/drm.h"
@@ -165,6 +161,9 @@ void si_init_screen_caps(struct si_screen *sscreen)
 
    caps->native_fence_fd = sscreen->info.has_fence_to_handle;
 
+   caps->device_type = sscreen->info.has_dedicated_vram
+      ? PIPE_DEVICE_TYPE_DISCRETE_GPU
+      : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
    caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->vendor_id = ATI_VENDOR_ID;
    caps->device_id = sscreen->info.pci_id;
@@ -183,4 +182,7 @@ void si_init_screen_caps(struct si_screen *sscreen)
    if (sscreen->info.has_timeline_syncobj &&
        !(sscreen->info.userq_ip_mask & BITFIELD_BIT(AMD_IP_GFX)))
       caps->max_timeline_semaphore_difference = UINT64_MAX;
+
+      /* Up to 16 bytes are accelerated */
+   caps->hw_clear_buffer_sizes = 1 | 2 | 4 | 8 | 16;
 }

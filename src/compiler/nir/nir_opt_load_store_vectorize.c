@@ -99,6 +99,8 @@ get_info(nir_intrinsic_op op)
       INFO(nir_var_mem_global, load_global_transpose_amd, true, -1, 0, -1, -1, 1)
       STORE(nir_var_mem_global, global, -1, 1, -1, 0, 1)
       LOAD(nir_var_mem_global, global_constant, -1, 0, -1, 1)
+      LOAD(nir_var_mem_global, global_offset, 0, 1, -1, 1)
+      STORE(nir_var_mem_global, global_offset, 1, 2, -1, 0, 1)
       LOAD(nir_var_mem_task_payload, task_payload, -1, 0, -1, 1)
       STORE(nir_var_mem_task_payload, task_payload, -1, 1, -1, 0, 1)
       ATOMIC(nir_var_mem_ssbo, ssbo, 0, 1, -1, 2, 1)
@@ -715,9 +717,13 @@ static void
 calc_alignment(struct entry *entry)
 {
    if (entry->intrin->intrinsic == nir_intrinsic_load_buffer_amd ||
-       entry->intrin->intrinsic == nir_intrinsic_store_buffer_amd) {
+       entry->intrin->intrinsic == nir_intrinsic_store_buffer_amd ||
+       entry->intrin->intrinsic == nir_intrinsic_load_global_offset ||
+       entry->intrin->intrinsic == nir_intrinsic_store_global_offset) {
       /* The alignment is the result of the descriptor and several offset/index sources, so just use
        * the original alignment.
+       * For global_offset, the final address is the sum of the 64b base address and the 32b offset
+       * so we cannot calculate the alignment by looking at the offset alone.
        */
       entry->align_mul = nir_intrinsic_align_mul(entry->intrin);
       entry->align_offset = nir_intrinsic_align_offset(entry->intrin);

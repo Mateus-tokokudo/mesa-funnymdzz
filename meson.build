@@ -91,7 +91,6 @@ pre_args = [
   '-D__STDC_FORMAT_MACROS',
   '-D__STDC_LIMIT_MACROS',
   '-DPACKAGE_VERSION="@0@"'.format(project_version),
-  '-DPACKAGE_BUGREPORT="https://gitlab.freedesktop.org/mesa/mesa/-/issues"',
 ]
 # Arguments for c or cpp compiler, can be compiler options
 c_cpp_args = []
@@ -100,6 +99,7 @@ c_args = []
 cpp_args = []
 
 with_moltenvk_dir = get_option('moltenvk-dir')
+with_vulkan_loader_rpath = get_option('vulkan-loader-rpath')
 with_vulkan_icd_dir = get_option('vulkan-icd-dir')
 with_tests = get_option('build-tests')
 with_glcpp_tests = get_option('enable-glcpp-tests')
@@ -129,13 +129,14 @@ if with_tools.contains('all')
     'nir',
     'nouveau',
     'panfrost',
+    'gamma',
     'zink',
   ]
 endif
 
 with_any_vulkan_layers = get_option('vulkan-layers').length() != 0
 with_intel_tools = with_tools.contains('intel') or with_tools.contains('intel-ui')
-with_imgui = with_intel_tools or with_vulkan_overlay_layer
+with_imgui = with_intel_tools or with_vulkan_overlay_layer or with_tools.contains('gamma')
 
 dri_drivers_path = get_option('dri-drivers-path')
 if dri_drivers_path == ''
@@ -238,10 +239,14 @@ foreach gallium_driver : gallium_drivers
   pre_args += '-DHAVE_@0@'.format(gallium_driver.to_upper())
 endforeach
 draw_with_llvm = with_llvm.allowed() and get_option('draw-use-llvm')
+r300_needs_draw = host_machine.cpu_family().startswith('x86')
+if with_gallium_r300 and r300_needs_draw and not draw_with_llvm
+  warning('r300 built without LLVM will be slow on integrated chipsets requiring software vertex processing.')
+endif
 with_llvm = with_llvm \
   .enable_if(with_gallium_i915, error_message : 'i915 Gallium driver requires LLVM for vertex shaders') \
   .enable_if(with_gallium_llvmpipe, error_message : 'LLVMPipe Gallium driver requires LLVM') \
-  .enable_if(with_gallium_r300 and draw_with_llvm, error_message : 'R300 Gallium driver requires LLVM for vertex shaders on IGP parts') \
+  .enable_if(with_gallium_r300 and r300_needs_draw and draw_with_llvm, error_message : 'R300 Gallium driver requires LLVM for vertex shaders on IGP parts') \
   .enable_if(with_gallium_radeonsi and amd_with_llvm, error_message : 'RadeonSI Gallium driver configured to require LLVM')
 
 # compatibility for "swrast" as an internal-ish driver name
@@ -492,7 +497,6 @@ endif
 
 with_platform_android = _platforms.contains('android')
 with_platform_x11 = _platforms.contains('x11')
-with_platform_xcb = _platforms.contains('xcb')
 with_platform_wayland = _platforms.contains('wayland')
 with_platform_haiku = _platforms.contains('haiku')
 with_platform_windows = _platforms.contains('windows')
@@ -584,14 +588,37 @@ if with_egl
     _platforms += 'drm'
   endif
 
-  egl_native_platform = get_option('egl-native-platform')
-  if egl_native_platform.contains('auto')
-    egl_native_platform = _platforms[0]
-  endif
-endif
+  # All the other platforms can be detected and cannot reach the native platform code
+  _undetectable_platforms = ['x11', 'haiku', 'android', 'surfaceless']
 
-if with_egl and not _platforms.contains(egl_native_platform)
-  error('-Degl-native-platform does not specify an enabled platform')
+  # Don't enforce the native platform if none of the undetectable platforms are enabled
+  _undetectable_platforms_enabled = []
+  foreach _platform : _platforms
+    if _platform in _undetectable_platforms
+      _undetectable_platforms_enabled += _platform
+    endif
+  endforeach
+
+  egl_native_platform = ''
+
+  if _undetectable_platforms_enabled.length() > 0
+    egl_native_platform = get_option('egl-native-platform')
+
+    if egl_native_platform.contains('auto')
+      egl_native_platform = _undetectable_platforms_enabled[0]
+
+    # Since we always add surfaceless without the user's ability to
+    # enable/disable it, if this is the only undetectable platform enabled,
+    # silently select it as the native platform.
+    elif _undetectable_platforms_enabled == ['surfaceless']
+      _undetectable_platforms_enabled = []
+      egl_native_platform = 'surfaceless'
+
+    # Make sure the native platform is one of the ones that can't be detected
+    elif egl_native_platform not in _undetectable_platforms
+      error('`-D egl-native-platform=...` must be one of: ' + ', '.join(_undetectable_platforms_enabled))
+    endif
+  endif
 endif
 
 if 'x11' in _platforms
@@ -840,6 +867,8 @@ endif
 
 _rtti = get_option('cpp_rtti')
 
+with_panfrost_rust = (with_gallium_panfrost or with_panfrost_vk) and get_option('panfrost-rust')
+
 with_gallium_rusticl = get_option('gallium-rusticl')
 if with_gallium_rusticl
   if not with_gallium
@@ -848,7 +877,7 @@ if with_gallium_rusticl
 endif
 
 with_virtgpu_kumquat = get_option('virtgpu_kumquat') and with_gfxstream_vk
-if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or with_virtgpu_kumquat
+if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or with_virtgpu_kumquat or with_panfrost_rust
   # rust.bindgen() does not pass `--rust-target` to bindgen until 1.7.0.
   if meson.version().version_compare('< 1.7.0')
     error('Mesa Rust support requires Meson 1.7.0 or newer')
@@ -859,14 +888,22 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
   rust = import('rust')
 
   # Keep this in sync with the `msrv` in clippy.toml
-  if rustc.version().version_compare('< 1.82')
-    error('Mesa requires Rust 1.82.0 or newer')
+  if rustc.version().version_compare('< 1.85')
+    error('Mesa requires Rust 1.85.0 or newer')
   endif
 
   # bindgen 0.71 is the first version that knows about `editions`
   bindgen_version = find_program('bindgen').version()
-  # unknown covers buggy 0.69.0, 0.71.0
-  if bindgen_version == 'unknown' or bindgen_version.version_compare('< 0.71.1')
+  bindgen_bad_versions = [
+    # unknown covers buggy 0.69.0, 0.71.0
+    'unknown',
+    '0.72.0',
+  ]
+  if bindgen_version in bindgen_bad_versions
+    error('Your bingden version is known to be buggy, please upgrade it. ' +
+          'If your distribution does not ship a more recent version, ' +
+          'you can install the latest version for your user with `cargo install bindgen-cli`.')
+  elif bindgen_version.version_compare('< 0.71.1')
     error('Mesa requires bindgen 0.71.1 or newer. ' +
           'If your distribution does not ship a recent enough version, ' +
           'you can install the latest version for your user with `cargo install bindgen-cli`.')
@@ -910,6 +947,8 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
     '-Dkeyword_idents_2024',
     '-Dmissing_unsafe_on_extern',
     '-Dnever_type_fallback_flowing_into_unsafe',
+    '-Drust_2024_guarded_string_incompatible_syntax',
+    '-Drust_2024_incompatible_pat',
     '-Drust_2024_prelude_collisions',
     '-Dstatic_mut_refs',
     '-Dunsafe_op_in_unsafe_fn',
@@ -919,8 +958,6 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
 
     # 1.83+
     # '-Dif_let_rescope',
-    # '-Drust_2024_guarded_string_incompatible_syntax',
-    # '-Drust_2024_incompatible_pat',
   ]
 endif
 
@@ -934,6 +971,7 @@ with_driver_using_cl = [
   with_gallium_iris, with_gallium_crocus, with_intel_vk, with_intel_hasvk,
   with_gallium_asahi, with_asahi_vk, with_tools.contains('asahi'),
   with_gallium_panfrost, with_panfrost_vk,
+  with_gallium_rusticl,
   with_nouveau_vk, with_imagination_vk,
   with_kosmickrisp_vk,
 ].contains(true)
@@ -945,7 +983,7 @@ if get_option('mesa-clc') == 'system'
   with_clc = with_gallium_rusticl
 else
   with_clc = get_option('mesa-clc') != 'auto' or \
-             with_microsoft_clc or with_gallium_rusticl or \
+             with_microsoft_clc or \
              with_drivers_clc or with_driver_using_cl
 endif
 
@@ -967,6 +1005,7 @@ with_gfx_compute = [
   with_any_vk,
   with_clc,
   with_gallium_va and with_video_encode,
+  with_gallium_mediafoundation and with_video_encode,
 ].contains(true)
 if with_gfx_compute
   pre_args += '-DHAVE_GFX_COMPUTE'
@@ -987,12 +1026,6 @@ if with_platform_x11
       pre_args += '-DGLX_USE_DRM'
     elif with_dri_platform == 'apple'
       pre_args += '-DGLX_USE_APPLEGL'
-      # Check to see if more than just the default 'swrast' is required
-      if (not with_gallium_softpipe) or 1 < gallium_drivers.length()
-        # Switch the MacOS code from "forwarding to the OpenGL.framework" mode
-        # and into actual Gallium Driver mode
-        pre_args += '-DGLX_USE_APPLE'
-      endif
     elif with_dri_platform == 'windows'
       pre_args += '-DGLX_USE_WINDOWSGL'
     endif
@@ -1171,6 +1204,13 @@ endforeach
 
 # Check for GCC overflow intrinsics
 foreach b : ['add_overflow', 'add_overflow_p', 'sub_overflow_p']
+  if cc.has_function('__builtin_' + b)
+    pre_args += '-DHAVE___BUILTIN_@0@'.format(b.to_upper())
+  endif
+endforeach
+
+# Check for ARM FP state builtins
+foreach b : ['arm_get_fpscr', 'arm_set_fpscr', 'aarch64_get_fpcr', 'aarch64_set_fpcr']
   if cc.has_function('__builtin_' + b)
     pre_args += '-DHAVE___BUILTIN_@0@'.format(b.to_upper())
   endif
@@ -1859,23 +1899,26 @@ endif
 dep_libdrm_amdgpu = null_dep
 dep_libdrm_intel = null_dep
 
-_drm_amdgpu_ver = '2.4.133'
-_drm_intel_ver = '2.4.75'
 _drm_ver = '2.4.109'
 
-_libdrm_checks = [
-  ['intel', with_gallium_i915],
-  ['amdgpu', (with_amd_vk and not with_platform_windows) or with_gallium_radeonsi],
-]
+_libdrm_checks = {
+  'intel': {
+    'version': '2.4.75',
+    'enabled': with_gallium_i915,
+  },
+  'amdgpu': {
+    'version': '2.4.133',
+    'enabled': (with_amd_vk and not with_platform_windows) or with_gallium_radeonsi,
+  },
+}
 
 # Loop over the enables versions and get the highest libdrm requirement for all
 # active drivers.
 _drm_blame = ''
-foreach d : _libdrm_checks
-  ver = get_variable('_drm_@0@_ver'.format(d[0]))
-  if d[1] and ver.version_compare('>' + _drm_ver)
-    _drm_ver = ver
-    _drm_blame = d[0]
+foreach name, d : _libdrm_checks
+  if d['enabled'] and d['version'].version_compare('>' + _drm_ver)
+    _drm_ver = d['version']
+    _drm_blame = name
   endif
 endforeach
 if _drm_blame != ''
@@ -1890,6 +1933,11 @@ if system_has_kms_drm
     'libdrm', version : '>=' + _drm_ver,
     required : with_dri2 or with_dri or with_gbm,
     allow_fallback: allow_fallback_for_libdrm,
+    default_options : {
+      'auto_features' : 'disabled',
+      'intel' : _libdrm_checks['intel']['enabled'].to_string('enabled', 'disabled'),
+      'amdgpu' : _libdrm_checks['amdgpu']['enabled'].to_string('enabled', 'disabled'),
+    },
   )
 else
   # We should prevent libdrm from being available when the target doesn't have it to avoid transitive
@@ -1904,12 +1952,12 @@ if dep_libdrm.found()
 endif
 
 # Then get each libdrm module
-foreach d : _libdrm_checks
-  if d[1]
+foreach name, d : _libdrm_checks
+  if d['enabled']
     set_variable(
-      'dep_libdrm_' + d[0],
+      'dep_libdrm_' + name,
       dependency(
-        'libdrm_' + d[0],
+        'libdrm_' + name,
         version : '>=' + _drm_ver,
         allow_fallback: allow_fallback_for_libdrm,
       )
@@ -1938,6 +1986,12 @@ if draw_with_llvm
   llvm_modules += 'native'
   # lto is needded with LLVM>=15, but we don't know what LLVM verrsion we are using yet
   llvm_optional_modules += ['lto']
+  if host_machine.system() == 'darwin'
+    # Apple systems frequently cross-compile and build fat binaries with multiple
+    # archs, so lp_build_create_jit_compiler_for_module() initializes every target
+    # instead of just the native one. Link all of them, not just the native one.
+    llvm_modules += 'all-targets'
+  endif
 endif
 
 # MCJIT is deprecated in LLVM and will not accept new architecture ports,
@@ -1979,10 +2033,6 @@ if dep_llvm.found()
 
   if with_gallium_i915 and not draw_with_llvm
     error('i915 requires LLVM draw support for vertex shaders.')
-  endif
-
-  if with_gallium_r300 and not draw_with_llvm and host_machine.cpu_family() == 'x86'
-    error('r300 requires LLVM draw support for vertex shaders.')
   endif
 
   if host_machine.system() != 'windows'
@@ -2106,8 +2156,10 @@ if not with_platform_windows and not dep_elf.found()
 endif
 if dep_elf.found()
   pre_args += '-DUSE_LIBELF'
-elif with_gallium_radeonsi
+elif with_gallium_radeonsi and with_gfx_compute
   error('Gallium driver radeonsi requires libelf')
+elif with_nouveau_vk
+  error('NVK requires libelf')
 endif
 
 dep_valgrind = dependency('valgrind', required : get_option('valgrind'))
@@ -2275,6 +2327,9 @@ if with_platform_x11
     dep_xext = dependency('xext')
     dep_xcb_glx = dependency('xcb-glx', version : dep_xcb_glx_version)
     dep_xcb_shm = dependency('xcb-shm')
+    if with_gallium_zink
+      dep_xcb_present = dependency('xcb-present', version : dep_xcb_present_version)
+    endif
   elif with_gallium_rusticl
     # needed for GL sharing extension
     dep_x11 = dependency('x11', version : dep_xlib_version)
@@ -2365,10 +2420,11 @@ with_perfetto = get_option('perfetto')
 with_datasources = get_option('datasources')
 with_any_datasource = with_datasources.length() != 0
 if with_perfetto
-  dep_perfetto = dependency(
+  dep_perfetto_sdk = dependency(
       'perfetto',
-      fallback: allow_fallback_for_perfetto ? ['perfetto', 'dep_perfetto'] : [],
+      fallback: allow_fallback_for_perfetto ? ['perfetto-sdk', 'dep_perfetto_sdk'] : [],
   )
+  dep_perfetto = dep_perfetto_sdk
   pre_args += '-DHAVE_PERFETTO'
 endif
 
@@ -2384,10 +2440,6 @@ renderdoc_integration_supported = [
 pre_args += '-DHAVE_RENDERDOC_INTEGRATION=@0@'.format(renderdoc_integration_supported.to_int())
 
 with_teflon = get_option('teflon')
-if with_teflon and with_tests
-  dep_flatbuffers = dependency('flatbuffers')
-  prog_flatc = find_program('flatc')
-endif
 
 with_gpuvis = get_option('gpuvis')
 if with_gpuvis
@@ -2559,6 +2611,7 @@ if with_egl
   endif
   egl_summary += {'Drivers': egl_drivers}
   egl_summary += {'Platforms': _platforms}
+  egl_summary += {'Native platform': egl_native_platform}
 endif
 summary(egl_summary, section: 'EGL', bool_yn: true, list_sep: ' ')
 

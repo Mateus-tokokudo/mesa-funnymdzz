@@ -1332,7 +1332,7 @@ framebuffer_size_for_pixel_count(uint32_t num_pixels,
 {
    assert(num_pixels > 0);
 
-   const uint32_t max_dim_pixels = V3D_MAX_IMAGE_DIMENSION;
+   const uint32_t max_dim_pixels = V3D_MAX_FRAMEBUFFER_SIZE(V3D_VERSION);
    const uint32_t max_pixels = max_dim_pixels * max_dim_pixels;
 
    uint32_t w, h;
@@ -1345,6 +1345,16 @@ framebuffer_size_for_pixel_count(uint32_t num_pixels,
       while (w > max_dim_pixels || ((w % 2) == 0 && w > 2 * h)) {
          w >>= 1;
          h <<= 1;
+      }
+      /* max_dim_pixels need not be a power of two (7680 on V3D 7.1), while h
+       * above only takes power-of-two values. The smallest power-of-two
+       * height that brings w within the limit can therefore exceed the limit
+       * itself (e.g. h steps 4096 -> 8192, past 7680). Pin h to the limit and
+       * re-derive w by integer division, keeping w * h <= num_pixels.
+       */
+      if (h > max_dim_pixels) {
+         h = max_dim_pixels;
+         w = num_pixels / h;
       }
    }
    assert(w <= max_dim_pixels && h <= max_dim_pixels);
@@ -1548,9 +1558,11 @@ meta_fill_buffer_tfu_stride0(struct v3dv_cmd_buffer *cmd_buffer,
       mtx_lock(&device->meta.mtx);
       struct v3dv_bo *zero_bo = device->meta.tfu_fill_zero.src_bo;
       if (!zero_bo) {
-         zero_bo = v3dv_bo_alloc(device, src_size, "tfu_fill_zero", true);
+         zero_bo = v3dv_bo_alloc(device, src_size, "tfu_fill_zero", true,
+                                 VK_OBJECT_TYPE_DEVICE,
+                                 vk_object_to_u64_handle(&device->vk.base));
          if (zero_bo && !v3dv_bo_map(device, zero_bo, src_size)) {
-            v3dv_bo_free(device, zero_bo);
+            v3dv_bo_free(device, zero_bo, 0);
             zero_bo = NULL;
          }
          if (zero_bo) {
@@ -1567,13 +1579,15 @@ meta_fill_buffer_tfu_stride0(struct v3dv_cmd_buffer *cmd_buffer,
    } else {
       src_bo = cmd_buffer->meta.tfu_fill.src_bo;
       if (!src_bo || cmd_buffer->meta.tfu_fill.data != data) {
-         src_bo = v3dv_bo_alloc(device, src_size, "tfu_fill_src", true);
+         src_bo = v3dv_bo_alloc(device, src_size, "tfu_fill_src", true,
+                                VK_OBJECT_TYPE_COMMAND_BUFFER,
+                                vk_object_to_u64_handle(&cmd_buffer->vk.base));
          if (!src_bo) {
             v3dv_flag_oom(cmd_buffer, NULL);
             return;
          }
          if (!v3dv_bo_map(device, src_bo, src_size)) {
-            v3dv_bo_free(device, src_bo);
+            v3dv_bo_free(device, src_bo, 0);
             v3dv_flag_oom(cmd_buffer, NULL);
             return;
          }

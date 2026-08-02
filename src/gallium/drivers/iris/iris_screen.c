@@ -394,7 +394,7 @@ iris_init_screen_caps(struct iris_screen *screen)
    caps->constant_buffer_offset_alignment = 32;
    caps->min_map_buffer_alignment = IRIS_MAP_BUFFER_ALIGNMENT;
    caps->shader_buffer_offset_alignment = 4;
-   caps->max_shader_buffer_size = (unsigned)MIN2(screen->isl_dev.max_buffer_size, INT32_MAX); // INT32_MAX is correct.
+   caps->max_shader_buffer_size = ROUND_DOWN_TO((unsigned)MIN2(screen->isl_dev.max_buffer_size, INT32_MAX), 256);
    caps->texture_buffer_offset_alignment = 16; // XXX: u_screen says 256 is the minimum value...
    caps->linear_image_pitch_alignment = 1;
    caps->linear_image_base_address_alignment = 1;
@@ -488,6 +488,10 @@ iris_init_screen_caps(struct iris_screen *screen)
     * for a minor improvement for a long deprecated feature.
     */
    caps->two_sided_color = false;
+
+   caps->device_type = devinfo->has_local_mem
+      ? PIPE_DEVICE_TYPE_DISCRETE_GPU
+      : PIPE_DEVICE_TYPE_INTEGRATED_GPU;
 
    if (devinfo->ver >= 9) {
       caps->shader_subgroup_size = 32;

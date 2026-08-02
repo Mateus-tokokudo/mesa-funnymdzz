@@ -5,6 +5,7 @@
 kk_device_dispatch_table_dependencies = declare_dependency(
   sources : [
     kk_dispatch_trampolines[1],
+    kk_dispatch_cmd[1],
   ],
 )
 
@@ -31,10 +32,21 @@ libkk_device_dispatch_table = static_library(
   build_by_default : false,
 )
 
+
+libkk_device_cmd_dispatch_table = static_library(
+  'kk_device_cmd_dispatch_table',
+  kk_dispatch_cmd,
+  include_directories : [inc_include, inc_src],
+  dependencies : kk_device_dispatch_table_dependencies_list,
+  c_args : c_msvc_compat_args,
+  gnu_symbol_visibility : 'hidden',
+  build_by_default : false,
+)
+
 idep_kk_device_dispatch_table = declare_dependency(
   # Instruct users of this library to link with --whole-archive.  Otherwise,
   # our weak function overloads may not resolve properly.
-  link_whole : [libkk_device_dispatch_table]
+  link_whole : [libkk_device_dispatch_table, libkk_device_cmd_dispatch_table]
 )
 
 kk_files = files(
@@ -64,8 +76,6 @@ kk_files = files(
   'kk_device_memory.c',
   'kk_device.h',
   'kk_device.c',
-  'kk_encoder.h',
-  'kk_encoder.c',
   'kk_event.h',
   'kk_event.c',
   'kk_format.h',
@@ -78,6 +88,7 @@ kk_files = files(
   'kk_image.c',
   'kk_instance.h',
   'kk_instance.c',
+  'kk_nir_lower_custom_border.c',
   'kk_nir_lower_descriptors.c',
   'kk_nir_lower_multiview.c',
   'kk_nir_lower_null_images.c',

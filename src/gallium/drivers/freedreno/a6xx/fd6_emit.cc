@@ -788,7 +788,7 @@ fd6_emit_gmem_cache_cntl(fd_cs &cs, struct fd_screen *screen, bool gmem)
          .add(RB_CCU_CACHE_CNTL(CHIP,
             .depth_offset_hi = depth_offset_hi,
             .color_offset_hi = color_offset_hi,
-            .depth_cache_size = CCU_CACHE_SIZE_FULL,
+            .depth_cache_size = (enum a6xx_ccu_cache_size)cfg->depth_cache_fraction,
             .depth_offset = depth_offset,
             .color_cache_size = color_cache_size,
             .color_offset = color_offset,
@@ -812,7 +812,7 @@ fd6_emit_gmem_cache_cntl(fd_cs &cs, struct fd_screen *screen, bool gmem)
                screen->info->props.concurrent_resolve,
             .depth_offset_hi = depth_offset_hi,
             .color_offset_hi = color_offset_hi,
-            .depth_cache_size = CCU_CACHE_SIZE_FULL,
+            .depth_cache_size = (enum a6xx_ccu_cache_size)cfg->depth_cache_fraction,
             .depth_offset = depth_offset,
             .color_cache_size = color_cache_size,
             .color_offset = color_offset,
@@ -926,7 +926,7 @@ fd6_emit_static_non_context_regs(struct fd_context *ctx, fd_cs &cs)
       ncrb.add(RB_UNKNOWN_8E09(CHIP, 0x7));
 
    if (CHIP >= A7XX)
-      ncrb.add(RB_A2D_UNKNOWN_8C34(CHIP));
+      ncrb.add(RB_A2D_DEST_BUFFER_ARRAY_PITCH(CHIP));
 }
 
 /**

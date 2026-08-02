@@ -23,7 +23,6 @@ spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 
 spec@!opengl 1.0@gl-1.0-swapbuffers-behavior,Fail
 
-spec@!opengl 1.1@depthstencil-default_fb-blit samples=16,Fail
 spec@!opengl 1.1@depthstencil-default_fb-blit samples=2,Fail
 spec@!opengl 1.1@depthstencil-default_fb-blit samples=6,Fail
 spec@!opengl 1.1@depthstencil-default_fb-blit samples=8,Fail
@@ -46,12 +45,6 @@ spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,
 spec@!opengl 1.0@rasterpos,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_gs_linked,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_tes_linked,Fail
-
-spec@!opengl 1.1@linestipple@Line strip,Fail
-spec@!opengl 1.1@linestipple@Line loop,Fail
-spec@!opengl 1.1@linestipple@Factor 2x,Fail
-spec@!opengl 1.1@linestipple@Factor 3x,Fail
-spec@!opengl 1.1@linestipple,Fail
 
 # polygon-mode: glPolygonMode(front=GL_LINE, back=GL_FILL), glCullMode(GL_NONE/GL_FALSE/GL_NO_ERROR) failed
 # At position 0, found prim GL_FILL instead of GL_LINE
@@ -134,62 +127,6 @@ spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 5- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 5- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 6- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 6- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 0- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 0- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 1- Grid: false,Fail
@@ -358,24 +295,6 @@ spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 5- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 5- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 6- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 6- Grid: true,Fail
-spec@arb_sample_shading@samplemask 16 all,Fail
-spec@arb_sample_shading@samplemask 16 all@0.062500 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@0.125000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@0.250000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@0.500000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@1.000000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@noms mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@noms partition,Fail
-spec@arb_sample_shading@samplemask 16 all@sample mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16,Fail
-spec@arb_sample_shading@samplemask 16@0.062500 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@0.125000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@0.250000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@0.500000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@1.000000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@noms mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@noms partition,Fail
-spec@arb_sample_shading@samplemask 16@sample mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2 all,Fail
 spec@arb_sample_shading@samplemask 2 all@0.500000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2 all@1.000000 mask_in_one,Fail
@@ -450,8 +369,6 @@ spec@egl_khr_surfaceless_context@viewport,Fail
 
 spec@ext_external_objects@vk-image-overwrite@RGB 10 A2 UINT optimal: Failed to initialize OpenGL FBO/RBO,Fail
 
-spec@ext_framebuffer_multisample@clip-and-scissor-blit 16 msaa,Fail
-
 spec@ext_transform_feedback@tessellation triangle_fan flat_first,Fail
 spec@ext_transform_feedback@tessellation quad_strip wireframe,Fail
 spec@ext_transform_feedback@tessellation quads wireframe,Fail
@@ -469,8 +386,6 @@ spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp@sRGB decode ful
 glx@glx-multi-window-single-context,Fail
 
 # uprev Piglit in Mesa
-spec@!opengl 1.1@large-tex,Fail
-spec@!opengl 1.1@large-tex@test_clear_tex_sub_image,Fail
 spec@arb_shader_storage_buffer_object@max-ssbo-size@fs,Crash
 spec@arb_shader_storage_buffer_object@max-ssbo-size@vs,Crash
 spec@egl_mesa_configless_context@basic,Fail
@@ -558,23 +473,6 @@ KHR-GL46.sparse_texture2_tests.SparseTexture2Commitment_texture_2d_multisample_a
 KHR-GL46.sparse_texture2_tests.SparseTexture2Commitment_texture_2d_multisample_rg32i,Fail
 KHR-GL46.sparse_texture2_tests.SparseTexture2Commitment_texture_2d_multisample_rg16f,Fail
 KHR-GL46.sparse_texture2_tests.SparseTexture2Commitment_texture_2d_multisample_rgb10_a2,Fail
-
-#glcts update
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_src_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_dst_x,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_src_dst_x,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_src_x,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_dst_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_src_dst_x,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_src_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_dst_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_src_x,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_src_dst_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_src_dst_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_dst_x,Fail
-
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min,Fail
 
 glx@glx_arb_sync_control@swapbuffersmsc-return,Fail
 glx@glx_arb_sync_control@swapbuffersmsc-divisor-zero,Fail

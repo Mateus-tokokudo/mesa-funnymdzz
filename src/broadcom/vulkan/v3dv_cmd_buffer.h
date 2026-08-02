@@ -711,10 +711,6 @@ void v3dv_cmd_buffer_copy_query_results(struct v3dv_cmd_buffer *cmd_buffer,
 void v3dv_cmd_buffer_add_tfu_job(struct v3dv_cmd_buffer *cmd_buffer,
                                  struct drm_v3d_submit_tfu *tfu);
 
-void v3dv_cmd_buffer_rewrite_indirect_csd_job(struct v3dv_device *device,
-                                              struct v3dv_csd_indirect_cpu_job_info *info,
-                                              const uint32_t *wg_counts);
-
 void v3dv_cmd_buffer_add_private_obj(struct v3dv_cmd_buffer *cmd_buffer,
                                      uint64_t obj,
                                      v3dv_cmd_buffer_private_obj_destroy_cb destroy_cb);
@@ -797,5 +793,13 @@ v3dv_cmd_buffer_get_descriptor_state(struct v3dv_cmd_buffer *cmd_buffer,
 
 VK_DEFINE_HANDLE_CASTS(v3dv_cmd_buffer, vk.base, VkCommandBuffer,
                        VK_OBJECT_TYPE_COMMAND_BUFFER)
+
+static inline uint64_t
+job_get_cmd_buffer_vk_handle(struct v3dv_job *job)
+{
+   assert(job);
+   return job->cmd_buffer ?
+     vk_object_to_u64_handle(&job->cmd_buffer->vk.base) : 0;
+}
 
 #endif /* V3DV_CMD_BUFFER_H */

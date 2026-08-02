@@ -188,6 +188,8 @@ intel_vram_all_mappable(const struct intel_device_info *devinfo)
 bool intel_get_device_info_from_fd(int fh, struct intel_device_info *devinfo, int min_ver, int max_ver);
 bool intel_get_device_info_from_pci_id(int pci_id,
                                        struct intel_device_info *devinfo);
+bool intel_get_device_info_for_build(int pci_id,
+                                     struct intel_device_info *devinfo);
 
 /* Only updates intel_device_info::regions::...::free fields. The
  * class/instance/size should remain the same over time.
@@ -256,6 +258,12 @@ static inline bool
 intel_use_tcs_multi_patch(const struct intel_device_info *devinfo)
 {
    return devinfo->ver >= 12;
+}
+
+static inline unsigned
+intel_device_info_max_sbids(const struct intel_device_info *devinfo)
+{
+   return devinfo->ver >= 30 ? 32 : 16;
 }
 
 #ifdef __cplusplus

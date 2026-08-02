@@ -235,6 +235,7 @@ optimizations += [
    (('iabs', ('ineg', a)), ('iabs', a)),
    (('fadd(nsz)', a, 0.0), ('fcanonicalize', a)),
    (('fadd', a, -0.0), ('fcanonicalize', a)),
+   (('fadd', ('b2f', a), 0.0), ('b2f', a)),
    (('iadd', a, 0), a),
    (('iadd_sat', a, 0), a),
    (('isub_sat', a, 0), a),
@@ -532,9 +533,9 @@ optimizations.extend([
    (('ftrunc@64', a), ('bcsel', ('flt', a, 0.0), ('fneg', ('ffloor', ('fabs', a))), ('ffloor', ('fabs', a))),
     '(options->lower_ftrunc || (options->lower_doubles_options & nir_lower_dtrunc)) && (!(options->lower_doubles_options & nir_lower_dfloor) || !(options->lower_doubles_options & nir_lower_dfract))'),
 
-   (('ffloor@16', a), ('fsub', a, ('ffract', a)), 'options->lower_ffloor'),
-   (('ffloor@32', a), ('fsub', a, ('ffract', a)), 'options->lower_ffloor'),
-   (('ffloor@64', a), ('fsub', a, ('ffract', a)), '(options->lower_ffloor || (options->lower_doubles_options & nir_lower_dfloor)) && !(options->lower_doubles_options & nir_lower_dfract)'),
+   (('ffloor@16', a), ('fsub', a, ('!ffract', a)), 'options->lower_ffloor'),
+   (('ffloor@32', a), ('fsub', a, ('!ffract', a)), 'options->lower_ffloor'),
+   (('ffloor@64', a), ('fsub', a, ('!ffract', a)), '(options->lower_ffloor || (options->lower_doubles_options & nir_lower_dfloor)) && !(options->lower_doubles_options & nir_lower_dfract)'),
    (('fadd@16', a, ('fadd@16', b, ('fneg', ('ffract', a)))), ('fadd@16', b, ('ffloor', a)), '!options->lower_ffloor'),
    (('fadd@32', a, ('fadd@32', b, ('fneg', ('ffract', a)))), ('fadd@32', b, ('ffloor', a)), '!options->lower_ffloor'),
    (('fadd@64', a, ('fadd@64', b, ('fneg', ('ffract', a)))), ('fadd@64', b, ('ffloor', a)), '!options->lower_ffloor && !(options->lower_doubles_options & nir_lower_dfloor)'),
@@ -751,6 +752,9 @@ optimizations.extend([
    (('iand', ('ilt', a, b), ('ilt', b, a)), False),
    (('iand', ('ult', a, b), ('ult', b, a)), False),
 
+   (('ieq', 'a', ('inot', 'a')), False),
+   (('ine', 'a', ('inot', 'a')), True),
+
    # This helps some shaders because, after some optimizations, they end up
    # with patterns like (-a < -b) || (b < a).  In an ideal world, this sort of
    # matching would be handled by CSE.
@@ -923,6 +927,31 @@ optimizations.extend([
    (('bcsel', a, ('b2f', 'b@1'), 1.0), ('b2f', ('bcsel', a, b, True))),
    (('bcsel', a, 0, ('b2f', 'b@1')), ('b2f', ('bcsel', a, False, b))),
    (('bcsel', a, 1.0, ('b2f', 'b@1')), ('b2f', ('bcsel', a, True, b))),
+
+   # These patterns can occur especially when continue statements are removed
+   # from loops like 'for (i = 0; i < x; i++)'.
+   (('bcsel', a, ('iadd', b, -1), b), ('iadd', b, ('ineg', ('b2i', a)))),
+   (('bcsel', a, ('iadd', b,  1), b), ('iadd', b,          ('b2i', a) )),
+   (('bcsel(is_only_used_as_float)',     a, ('fadd', b, -1.0), b), ('fadd', b, ('fneg', ('b2f', a)))),
+   (('bcsel(is_only_used_as_float_nsz)', a, ('fadd', b,  1.0), b), ('fadd', b,          ('b2f', a) )),
+
+   (('bcsel', a, b, ('iadd', b, -1)), ('iadd', b, ('ineg', ('b2i', ('inot', a))))),
+   (('bcsel', a, b, ('iadd', b,  1)), ('iadd', b,          ('b2i', ('inot', a)) )),
+   (('bcsel(is_only_used_as_float)',     a, b, ('fadd', b, -1.0)), ('fadd', b, ('fneg', ('b2f', ('inot', a))))),
+   (('bcsel(is_only_used_as_float_nsz)', a, b, ('fadd', b,  1.0)), ('fadd', b,          ('b2f', ('inot', a)) )),
+
+   # Since b2i(inot(a)) == 1 - b2i(a), 1 - b2i(inot(a)) == b2i(a).
+   (('iadd', '#a', ('ineg', ('b2i', ('inot', b)))), ('iadd', ('iadd', a, -1),          ('b2i', b) )),
+   (('iadd', '#a',          ('b2i', ('inot', b)) ), ('iadd', ('iadd', a,  1), ('ineg', ('b2i', b)))),
+   (('~fadd', '#a', ('fneg', ('b2f', ('inot', b)))), ('fadd', ('fadd', a, -1.0),          ('b2f', b) )),
+   (('~fadd', '#a',          ('b2f', ('inot', b)) ), ('fadd', ('fadd', a,  1.0), ('fneg', ('b2f', b)))),
+
+   # The preceeding patterns can create some messes that other patterns can't
+   # clean up.
+   (('fadd', ('fneg', ('b2f', b)), ('fneg', ('b2f', ('inot', b)))), -1.0),
+   (('fadd', ('b2f', b), ('b2f', ('inot', b))), 1.0),
+   (('fadd', ('fadd', a, ('fneg', ('b2f', b))), ('fneg', ('b2f', ('inot', b)))), ('fadd', a, -1.0)),
+   (('fadd', ('fadd', a, ('b2f', b)), ('b2f', ('inot', b))), ('fadd', a, 1.0)),
 
    # fmin(b2f(a), b)
    # bcsel(a, fmin(b2f(a), b), fmin(b2f(a), b))
@@ -1246,7 +1275,7 @@ for s in [16, 32, 64]:
        (('i2f{}'.format(s), ('f2i', ('fsign', 'a@{}'.format(s)))), ('fsign', a)),
     ])
 
-    if s < 64:
+    if s == 32:
         optimizations.extend([(('bcsel', a, ('b2f(is_used_once)', 'b@{}'.format(s)), ('b2f', 'c@{}'.format(s))), ('b2f', ('bcsel', a, b, c)))])
 
     for B in [32, 64]:
@@ -1391,7 +1420,7 @@ for s in [8, 16, 32, 64]:
     ])
 
     # There are no 64bit booleans in NIR
-    if s < 64:
+    if s == 32:
         # True/False are ~0 and 0 in NIR.  b2i of True is 1, and -1 is ~0 (True).
         optimizations.extend([(('ineg', ('b2i{}'.format(s), 'a@{}'.format(s))), a)])
 
@@ -1974,11 +2003,6 @@ optimizations.extend([
    (('f2u32', ('f2fmp', 'a@32')), ('f2u32', a), 'true', TestStatus.UNSUPPORTED),
    (('i2f32', ('i2imp', 'a@32')), ('i2f32', a), 'true', TestStatus.UNSUPPORTED),
 
-   # f16 -> f2f32 -> fmul32 -> f2fmp when the second operand is a constant
-   # The optimization only works when the constant can be safely represented with 16 bits
-   (('f2fmp', ('fmul(is_used_once,contract)', ('f2f32', 'a@16'), '#b(is_representable_as_f16)')), ('fmul', a, ('f2fmp', b)), 'true', TestStatus.UNSUPPORTED),
-   (('f2fmp', ('fadd(is_used_once,contract)', ('f2f32', 'a@16'), '#b(is_representable_as_f16)')), ('fadd', a, ('f2fmp', b)), 'true', TestStatus.UNSUPPORTED),
-
    (('ffloor', 'a(is_integral)'), a),
    (('fceil', 'a(is_integral)'), a),
    (('ftrunc', 'a(is_integral)'), a),
@@ -2026,6 +2050,14 @@ optimizations.extend([
 
    (('ult', a, 0), False),
 ])
+
+# Doing a 32-bit fadd/fmul on 16-bit operands is equivalent to a 16-bit
+# fadd/fmul, contract is required for the double rounding.
+for op in ['fadd', 'fmul']:
+    optimizations += [
+        (('f2fmp', (f'{op}(is_used_once,contract)', ('f2f32', 'a@16'), '#b(is_representable_as_f16)')), (op, a, ('f2fmp', b)), 'true', TestStatus.UNSUPPORTED),
+        (('f2fmp', (f'{op}(is_used_once,contract)', ('f2f32', 'a@16'), ('f2f32', 'b@16'))), (op, a, b), 'true', TestStatus.UNSUPPORTED),
+    ]
 
 for bits in [16, 32, 64]:
     cond = '!(options->lower_doubles_options & nir_lower_fp64_full_software)' if bits == 64 else 'true'
@@ -2462,6 +2494,10 @@ optimizations.extend([
    (('uadd_carry', a, b), ('b2i', ('ult', ('iadd', a, b), a)), 'options->lower_uadd_carry'),
    (('usub_borrow', a, b), ('b2i', ('ult', a, b)), 'options->lower_usub_borrow'),
 
+   # hand-rolled iadd64
+   (('vec2', ('iadd@32', a, c), ('iadd', ('iadd', b, d), ('uadd_carry', a, c))),
+     ('unpack_64_2x32', ('iadd', ('pack_64_2x32_split', a, b), ('pack_64_2x32_split', c, d))), '!(options->lower_int64_options & nir_lower_iadd64)'),
+
    (('ihadd', a, b), ('iadd', ('iand', a, b), ('ishr', ('ixor', a, b), 1)), 'options->lower_hadd'),
    (('uhadd', a, b), ('iadd', ('iand', a, b), ('ushr', ('ixor', a, b), 1)), 'options->lower_hadd'),
    (('irhadd', a, b), ('isub', ('ior', a, b), ('ishr', ('ixor', a, b), 1)), 'options->lower_hadd'),
@@ -2762,10 +2798,10 @@ optimizations.extend([
      '!nir_is_rounding_mode_rtz(info->float_controls_execution_mode, 32)'),
     (('f2u32', ('fmul', ('fmul', ('u2f32', ('extract_u8', 'a@32', b)), 0x3b808081), 255.0)),
      ('extract_u8', a, b)),
-    (('f2u32', ('fmul', ('fmin', 1.0, ('fmax', -1.0, ('fmul', ('u2f32', ('extract_i16', 'a@32', b)), 0x38000100))), 32767.0)),
+    (('f2u32', ('fmul', ('fmin', 1.0, ('fmax', -1.0, ('fmul', ('i2f32', ('extract_i16', 'a@32', b)), 0x38000100))), 32767.0)),
      ('imax', ('extract_i16', a, b), -32767),
      '!nir_is_rounding_mode_rtz(info->float_controls_execution_mode, 32)'),
-    (('f2u32', ('fmul', ('fmin', 1.0, ('fmax', -1.0, ('fmul', ('u2f32', ('extract_i8', 'a@32', b)), 0x3c010204))), 127.0)),
+    (('f2u32', ('fmul', ('fmin', 1.0, ('fmax', -1.0, ('fmul', ('i2f32', ('extract_i8', 'a@32', b)), 0x3c010204))), 127.0)),
      ('imax', ('extract_i8', a, b), -127),
      '!nir_is_rounding_mode_rtz(info->float_controls_execution_mode, 32)'),
 
@@ -3307,10 +3343,9 @@ optimizations += [(bitfield_reverse_cp2077('x@32'), ('bitfield_reverse', 'x'), '
 # Input is f32, output is u32 that has the f16 packed into its low bits.
 def vkd3d_proton_packed_f2f16_rtz_lo(a, abs_a):
     packed_half = ('pack_half_2x16_rtz_split', a, 0)
-    packed_half_minus1 = ('iadd', packed_half, 0xffffffff)
     f32_was_not_inf = ('fneu', abs_a, 0x7f800000)
     f16_is_now_inf = ('ieq', ('iand', packed_half, 0x7fff), 0x7c00)
-    return ('bcsel', ('iand', f32_was_not_inf, f16_is_now_inf), packed_half_minus1, packed_half)
+    return ('iadd', packed_half, ('ineg', ('b2i', ('iand', f32_was_not_inf, f16_is_now_inf))))
 
 optimizations += [
    (vkd3d_proton_packed_f2f16_rtz_lo('x', ('fabs', 'x')), ('pack_half_2x16_rtz_split', 'x', 0)),
@@ -3612,11 +3647,29 @@ late_optimizations = [
    #      a == -b      true             true        false    false
    #  (a+b) != 0       true             true        true     true
    #      a != -b      false            false       true     true
+   #
+   #  For ordered/unordered counterparts:
+   #
+   #               a=Inf, b=-Inf   a=-Inf, b=Inf    a=NaN    b=NaN
+   #  (a+b) <u 0       true             true        true     true
+   #      a <u -b      false            false       true     true
+   #  (a+b) >=u 0      true             true        true     true
+   #      a >=u -b     true             true        true     true
+   #  (a+b) ==u 0      true             true        true     true
+   #      a ==u -b     true             true        true     true
+   #  (a+b) !=o 0      false            false       false    false
+   #      a !=o -b     false            false       false    false
    (('flt', ('fadd(is_used_once)', a, b),  0.0), ('flt',          a, ('fneg', b))),
    (('flt', 0.0, ('fadd(is_used_once)', a, b) ), ('flt', ('fneg', a),         b)),
+   (('fltu', ('fadd(is_used_once,ninf)', a, b),  0.0), ('fltu',          a, ('fneg', b))),
+   (('fltu', 0.0, ('fadd(is_used_once,ninf)', a, b) ), ('fltu', ('fneg', a),         b)),
    (('fge', ('fadd(is_used_once,ninf)', a, b),  0.0), ('fge',          a, ('fneg', b))),
    (('fge', 0.0, ('fadd(is_used_once,ninf)', a, b) ), ('fge', ('fneg', a),         b)),
+   (('fgeu', ('fadd(is_used_once)', a, b),  0.0), ('fgeu',          a, ('fneg', b))),
+   (('fgeu', 0.0, ('fadd(is_used_once)', a, b) ), ('fgeu', ('fneg', a),         b)),
    (('feq', ('fadd(is_used_once,ninf)', a, b), 0.0), ('feq', a, ('fneg', b))),
+   (('fequ', ('fadd(is_used_once)', a, b), 0.0), ('fequ', a, ('fneg', b))),
+   (('fneo', ('fadd(is_used_once)', a, b), 0.0), ('fneo', a, ('fneg', b))),
    (('fneu', ('fadd(is_used_once,ninf)', a, b), 0.0), ('fneu', a, ('fneg', b))),
 
    # If either source must be finite, then the original (a+b) cannot produce
@@ -3624,6 +3677,8 @@ late_optimizations = [
    # result if b is NaN. Therefore, the replacements are exact.
    (('fge', ('fadd(is_used_once)', 'a(is_finite)', b),  0.0), ('fge',          a, ('fneg', b))),
    (('fge', 0.0, ('fadd(is_used_once)', 'a(is_finite)', b) ), ('fge', ('fneg', a),         b)),
+   (('fltu', ('fadd(is_used_once)', 'a(is_finite)', b),  0.0), ('fltu',          a, ('fneg', b))),
+   (('fltu', 0.0, ('fadd(is_used_once)', 'a(is_finite)', b) ), ('fltu', ('fneg', a),         b)),
    (('feq',  ('fadd(is_used_once)', 'a(is_finite)', b), 0.0), ('feq',  a, ('fneg', b))),
    (('fneu', ('fadd(is_used_once)', 'a(is_finite)', b), 0.0), ('fneu', a, ('fneg', b))),
 
@@ -3679,6 +3734,12 @@ late_optimizations = [
    # Drivers do not actually implement udiv_aligned_4, it is just used to
    # optimize scratch lowering.
    (('udiv_aligned_4', a), ('ushr', a, 2)),
+
+   # Since b2i(inot(a)) == 1 - b2i(a), 1 - b2i(inot(a)) == b2i(a).
+   (('iadd3', a,          ('b2i', ('inot', b)),  -1), ('iadd', a, ('ineg', ('b2i', b)))),
+   (('iadd3', a, ('ineg', ('b2i', ('inot', b))),  1), ('iadd', a,          ('b2i', b) )),
+   (('iadd', a, ('ineg', ('b2i', ('inot', b)))), ('iadd3', a,          ('b2i', b) , -1), 'options->has_iadd3'),
+   (('iadd', a,          ('b2i', ('inot', b)) ), ('iadd3', a, ('ineg', ('b2i', b)),  1), 'options->has_iadd3'),
 ]
 
 for int_sz in (8, 16, 32):
@@ -3823,18 +3884,20 @@ late_optimizations.extend([
    (('fge', ('fsat(is_used_once)', a), 1.0), ('fge', a, 1.0)),
 
    (('fge', ('fmin(is_used_once,nnan)', ('fadd(is_used_once)', a, b), ('fadd', c, d)), 0.0), ('iand', ('fge', a, ('fneg', b)), ('fge', c, ('fneg', d)))),
+])
 
-   (('flt', ('fneg', a), ('fneg', b)), ('flt', b, a)),
-   (('fge', ('fneg', a), ('fneg', b)), ('fge', b, a)),
-   (('feq', ('fneg', a), ('fneg', b)), ('feq', b, a)),
-   (('fneu', ('fneg', a), ('fneg', b)), ('fneu', b, a)),
-   (('flt', ('fneg', a), '#b'), ('flt', ('fneg', b), a)),
-   (('flt', '#b', ('fneg', a)), ('flt', a, ('fneg', b))),
-   (('fge', ('fneg', a), '#b'), ('fge', ('fneg', b), a)),
-   (('fge', '#b', ('fneg', a)), ('fge', a, ('fneg', b))),
-   (('fneu', ('fneg', a), '#b'), ('fneu', ('fneg', b), a)),
-   (('feq', '#b', ('fneg', a)), ('feq', a, ('fneg', b))),
+for cmp in ['flt', 'fltu', 'fge', 'fgeu', 'feq', 'fequ', 'fneo', 'fneu']:
+   late_optimizations.extend([
+      ((cmp, ('fneg', a), ('fneg', b)), (cmp, b, a)),
+      ((cmp, ('fneg', a), '#b'), (cmp, ('fneg', b), a)),
+   ])
 
+for cmp in ['flt', 'fltu', 'fge', 'fgeu']:
+   late_optimizations.extend([
+      ((cmp, '#b', ('fneg', a)), (cmp, a, ('fneg', b))),
+   ])
+
+late_optimizations.extend([
    (('ior', a, a), a),
    (('iand', a, a), a),
 
@@ -3849,14 +3912,16 @@ late_optimizations.extend([
 
    (('~flrp', ('fadd(is_used_once)', a, b), ('fadd(is_used_once)', a, c), d), ('fadd', ('flrp', b, c, d), a)),
 
-   # Approximate handling of fround_even for DX9 addressing from gallium nine on
-   # DX9-class hardware with no proper fround support.  This is in
-   # late_optimizations so that the is_integral() opts in the main pass get a
-   # chance to eliminate the fround_even first.
-   (('fround_even', a), ('bcsel',
-                         ('feq', ('ffract', a), 0.5),
-                         ('fadd', ('ffloor', ('fadd', a, 0.5)), 1.0),
-                         ('ffloor', ('fadd', a, 0.5))), 'options->lower_fround_even'),
+   # Lower roundEven for hardware without a native round instruction.
+   # Round to the nearest integer using ffloor and ffract, and on a half break
+   # the tie towards the even neighbour. Kept in late_optimizations so that
+   # is_integral() can remove the roundEven first.
+   (('fround_even', a), ('fadd', ('ffloor', a),
+                         ('bcsel', ('flt', 0.5, ('ffract', a)),
+                          1.0,
+                          ('bcsel', ('feq', ('ffract', a), 0.5),
+                           ('fmul', ('ffract', ('fmul', ('ffloor', a), 0.5)), 2.0),
+                           0.0))), 'options->lower_fround_even'),
 
    # A similar operation could apply to any ffma(#a, b, #(-a/2)), but this
    # particular operation is common for expanding values stored in a texture

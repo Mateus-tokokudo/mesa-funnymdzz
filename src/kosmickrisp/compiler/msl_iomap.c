@@ -8,6 +8,7 @@
  * model of I/O to the Metal one. */
 
 #include "msl_private.h"
+#include "nir_to_msl.h"
 
 #include "nir_builder.h"
 
@@ -36,8 +37,6 @@ alu_type_to_string(nir_alu_type type)
       return "half";
    case nir_type_float32:
       return "float";
-   case nir_type_bool8:
-      return "bool";
    default:
       UNREACHABLE("Unsupported nir_alu_type");
    }
@@ -441,6 +440,7 @@ msl_emit_io_blocks(struct nir_to_msl_ctx *ctx, nir_shader *shader)
       fs_output_block(shader, ctx);
       break;
    case MESA_SHADER_COMPUTE:
+   case MESA_SHADER_TESS_CTRL:
       break;
    default:
       assert(0);
@@ -456,7 +456,7 @@ msl_emit_io_blocks(struct nir_to_msl_ctx *ctx, nir_shader *shader)
 
    P(ctx, "struct SamplerTable {\n");
    ctx->indentlevel++;
-   P_IND(ctx, "sampler handles[1024];\n");
+   P_IND(ctx, "sampler handles[%d];\n", MSL_MAX_SAMPLERS);
    ctx->indentlevel--;
    P(ctx, "};\n")
 }

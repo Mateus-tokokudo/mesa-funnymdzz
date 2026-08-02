@@ -63,7 +63,7 @@ push_constants_bo_free(VkDevice _device,
                        VkAllocationCallbacks *alloc)
 {
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
-   v3dv_bo_free(device, (struct v3dv_bo *)(uintptr_t) bo_ptr);
+   v3dv_bo_free(device, (struct v3dv_bo *)(uintptr_t) bo_ptr, 0);
 }
 
 /*
@@ -83,7 +83,9 @@ check_push_constants_ubo(struct v3dv_cmd_buffer *cmd_buffer,
 
    if (cmd_buffer->push_constants_resource.bo == NULL) {
       cmd_buffer->push_constants_resource.bo =
-         v3dv_bo_alloc(cmd_buffer->device, 4096, "push constants", true);
+         v3dv_bo_alloc(cmd_buffer->device, 4096, "push constants", true,
+                       VK_OBJECT_TYPE_COMMAND_BUFFER,
+                       vk_object_to_u64_handle(&cmd_buffer->vk.base));
 
       v3dv_job_add_bo(cmd_buffer->state.job,
                       cmd_buffer->push_constants_resource.bo);
@@ -152,7 +154,11 @@ write_tmu_p0(struct v3dv_cmd_buffer *cmd_buffer,
       v3dv_descriptor_map_get_texture_bo(descriptor_state,
                                          &pipeline->shared_data->maps[stage]->texture_map,
                                          pipeline->layout, texture_idx);
-   assert(texture_bo);
+   assert(texture_bo || cmd_buffer->device->vk.enabled_features.nullDescriptor);
+
+   if (!texture_bo)
+      texture_bo = cmd_buffer->device->null_bo;
+
    assert(texture_idx < V3D_MAX_TEXTURE_SAMPLERS);
    tex_bos->tex[texture_idx] = texture_bo;
 
@@ -201,11 +207,12 @@ write_tmu_p1(struct v3dv_cmd_buffer *cmd_buffer,
       v3dv_descriptor_map_get_sampler(descriptor_state,
                                       &pipeline->shared_data->maps[stage]->sampler_map,
                                       pipeline->layout, sampler_idx);
-   assert(sampler);
+
+   assert(sampler || cmd_buffer->device->vk.enabled_features.nullDescriptor);
 
    /* Set unnormalized coordinates flag from sampler object */
    uint32_t p1_packed = v3d_unit_data_get_offset(data);
-   if (sampler->unnormalized_coordinates) {
+   if (sampler && sampler->unnormalized_coordinates) {
       v3d_pack_unnormalized_coordinates(&cmd_buffer->device->devinfo, &p1_packed,
                                         sampler->unnormalized_coordinates);
    }
@@ -308,15 +315,25 @@ write_ubo_ssbo_uniforms(struct v3dv_cmd_buffer *cmd_buffer,
             bo = reloc.bo;
             addr = reloc.bo->offset + reloc.offset + offset;
          } else {
-            assert(descriptor->buffer);
-            assert(descriptor->buffer->mem);
-            assert(descriptor->buffer->mem->bo);
+            /* This can happen when nullDescriptor is used. In that
+             * case the compiler will not emit the buffer access so
+             * the descriptor won't be accessed at all.
+             */
+            if (!descriptor->buffer) {
+               assert(cmd_buffer->device->vk.enabled_features.nullDescriptor);
+               bo = NULL;
+               addr = 0;
+            } else {
+               assert(descriptor->buffer);
+               assert(descriptor->buffer->mem);
+               assert(descriptor->buffer->mem->bo);
 
-            bo = descriptor->buffer->mem->bo;
-            addr = bo->offset +
-                   descriptor->buffer->mem_offset +
-                   descriptor->offset +
-                   offset + dynamic_offset;
+               bo = descriptor->buffer->mem->bo;
+               addr = bo->offset +
+                      descriptor->buffer->mem_offset +
+                      descriptor->offset +
+                      offset + dynamic_offset;
+            }
          }
 
          cl_aligned_u32(uniforms, addr);
@@ -364,6 +381,9 @@ get_texture_size_from_image_view(struct v3dv_image_view *image_view,
                                  enum quniform_contents contents,
                                  uint32_t data)
 {
+   if (!image_view)
+      return 0;
+
    switch(contents) {
    case QUNIFORM_IMAGE_WIDTH:
    case QUNIFORM_TEXTURE_WIDTH:
@@ -401,6 +421,9 @@ get_texture_size_from_buffer_view(struct v3dv_buffer_view *buffer_view,
                                   enum quniform_contents contents,
                                   uint32_t data)
 {
+   if (!buffer_view)
+      return 0;
+
    switch(contents) {
    case QUNIFORM_IMAGE_WIDTH:
    case QUNIFORM_TEXTURE_WIDTH:

@@ -198,14 +198,16 @@ vk_image_usage_to_format_features(VkImageUsageFlagBits usage_flag)
 }
 
 uint32_t
-kk_image_max_dimension(VkImageType image_type)
+kk_image_max_dimension(const struct kk_physical_device *pdev,
+                       VkImageType image_type)
 {
-   /* Values taken from Apple7
+   /* Base values taken from Apple7
     * https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf */
    switch (image_type) {
    case VK_IMAGE_TYPE_1D:
    case VK_IMAGE_TYPE_2D:
-      return 16384;
+      /* Apple10 and later raise the 1D/2D/cube limit to 32768. */
+      return pdev->info.gpu_apple_family >= 10 ? 32768 : 16384;
    case VK_IMAGE_TYPE_3D:
       return 2048;
    default:
@@ -243,14 +245,6 @@ kk_GetPhysicalDeviceImageFormatProperties2(
        pImageFormatInfo->type == VK_IMAGE_TYPE_3D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   /* Metal disallows reading compressed formats as uncompressed format.
-    * VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT is only used with
-    * compressed formats.
-    */
-   if (pImageFormatInfo->flags &
-       VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT)
-      return VK_ERROR_FORMAT_NOT_SUPPORTED;
-
    const struct vk_format_ycbcr_info *ycbcr_info =
       vk_format_get_ycbcr_info(pImageFormatInfo->format);
 
@@ -279,10 +273,11 @@ kk_GetPhysicalDeviceImageFormatProperties2(
        pImageFormatInfo->type == VK_IMAGE_TYPE_3D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   /* TODO_KOSMICKRISP We could allow linear images that are used as render
-    * target as long as they are not used as input attachments. Main reason for
-    * this is that we expect arrays when rendering and reading from input
-    * attachments and Metal disallows arrays for linear textures.
+   /* TODO_KOSMICKRISP Linear images cannot be used as color attachments as long
+    * as input attachments are changed to arrays. Vulkan specifies that any
+    * image format supporting the color attachment feature also supports being
+    * used as an input attachment, and Metal disallows arrays for linear
+    * textures.
     */
    if (pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR &&
        (pImageFormatInfo->usage &
@@ -333,7 +328,8 @@ kk_GetPhysicalDeviceImageFormatProperties2(
        pImageFormatInfo->type != VK_IMAGE_TYPE_2D)
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
-   const uint32_t max_dim = kk_image_max_dimension(pImageFormatInfo->type);
+   const uint32_t max_dim =
+      kk_image_max_dimension(pdev, pImageFormatInfo->type);
    assert(util_is_power_of_two_nonzero(max_dim));
    uint32_t maxMipLevels = util_logbase2(max_dim) + 1;
    VkExtent3D maxExtent;
@@ -370,13 +366,9 @@ kk_GetPhysicalDeviceImageFormatProperties2(
        pImageFormatInfo->type == VK_IMAGE_TYPE_2D && ycbcr_info == NULL &&
        (features & (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
                     VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
-       !(pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)) {
-      sampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT |
-         // TODO_KOSMICKRISP Modify sample count based on what pdev supports
-         VK_SAMPLE_COUNT_4_BIT /* |
-          VK_SAMPLE_COUNT_8_BIT */
-         ;
+       !(pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) &&
+       !(pImageFormatInfo->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+      sampleCounts = pdev->info.supported_sample_counts;
    }
 
    /* From the Vulkan 1.2.199 spec:
@@ -410,6 +402,15 @@ kk_GetPhysicalDeviceImageFormatProperties2(
       case VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLHEAP_BIT_EXT:
          ext_mem_props = &kk_mtlheap_mem_props;
          break;
+      case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
+      case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_MAPPED_FOREIGN_MEMORY_BIT_EXT: {
+         if (pImageFormatInfo->tiling != VK_IMAGE_TILING_LINEAR) {
+            return vk_errorf(pdev, VK_ERROR_FORMAT_NOT_SUPPORTED,
+                             "host memory import image must be linear");
+         }
+         ext_mem_props = &kk_host_mem_props;
+         break;
+      }
       default:
          /* From the Vulkan 1.3.256 spec:
           *
@@ -495,10 +496,11 @@ kk_GetPhysicalDeviceImageFormatProperties2(
          /* Optimal device access and identical memory layout if optimization
           * is the same both with and without host transfer usage */
          bool with_host_transfer = kk_image_layout_can_optimize(
-            pImageFormatInfo->usage, pImageFormatInfo->tiling, p_format);
+            pImageFormatInfo->usage, pImageFormatInfo->tiling,
+            pImageFormatInfo->flags, p_format);
          bool without_host_transfer = kk_image_layout_can_optimize(
             pImageFormatInfo->usage & ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT,
-            pImageFormatInfo->tiling, p_format);
+            pImageFormatInfo->tiling, pImageFormatInfo->flags, p_format);
          host_props->optimalDeviceAccess =
             with_host_transfer == without_host_transfer;
          host_props->identicalMemoryLayout = host_props->optimalDeviceAccess;
@@ -830,6 +832,19 @@ kk_GetDeviceImageSubresourceLayoutKHR(
    kk_image_finish(dev, &image, NULL);
 }
 
+mtl_texture *
+kk_image_plane_create_texture(struct kk_image_plane *plane,
+                              struct kk_image_layout *layout, uint64_t offset_B)
+{
+   uint64_t mem_offset_B = plane->mem_offset_B + offset_B;
+   if (plane->layout.linear)
+      return mtl_new_texture_with_descriptor_linear(plane->mem->bo->map, layout,
+                                                    mem_offset_B);
+
+   return mtl_new_texture_with_descriptor(plane->mem->bo->mtl_handle, layout,
+                                          mem_offset_B);
+}
+
 static VkResult
 kk_image_plane_bind(struct kk_device *dev, struct kk_image *image,
                     struct kk_image_plane *plane, struct kk_device_memory *mem,
@@ -840,13 +855,12 @@ kk_image_plane_bind(struct kk_device *dev, struct kk_image *image,
                                &plane_align_B);
    *offset_B = align64(*offset_B, plane_align_B);
 
+   assert(plane->layout.linear || mem->bo->mtl_handle);
+
    /* Linear textures in Metal need to be allocated through a buffer... */
-   if (plane->layout.linear)
-      plane->mtl_handle = mtl_new_texture_with_descriptor_linear(
-         mem->bo->map, &plane->layout, *offset_B);
-   else
-      plane->mtl_handle = mtl_new_texture_with_descriptor(
-         mem->bo->mtl_handle, &plane->layout, *offset_B);
+   plane->mem = mem;
+   plane->mem_offset_B = *offset_B;
+   plane->mtl_handle = kk_image_plane_create_texture(plane, &plane->layout, 0u);
    plane->addr = mem->bo->gpu + *offset_B;
 
    /* Create auxiliary 2D array texture for 3D images so we can use 2D views of

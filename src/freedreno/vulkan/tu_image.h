@@ -17,18 +17,6 @@
 
 #define TU_MAX_PLANE_COUNT 3
 
-#define tu_fdl_view_stencil(view, x)                                         \
-   pkt_field_set(A6XX_##x##_COLOR_FORMAT, (view)->x, FMT6_8_UINT)
-
-#define tu_fdl_view_depth(view, x)                                           \
-   pkt_field_set(A6XX_##x##_COLOR_FORMAT, (view)->x, FMT6_32_FLOAT)
-
-#define tu_image_view_stencil(iview, x) \
-   tu_fdl_view_stencil(&iview->view, x)
-
-#define tu_image_view_depth(iview, x) \
-   tu_fdl_view_depth(&iview->view, x)
-
 struct tu_image
 {
    struct vk_image vk;
@@ -55,14 +43,39 @@ struct tu_image
    /* Maximum width/height of tiles for use with this image, or ~0 if no constraints. */
    uint32_t max_tile_w_constraint_fdm;
    uint32_t max_tile_h_constraint_fdm;
+
+   /* Identity of the image for RP hashing and analysis, per
+    * tu_image_id_mode. 0 means no identity was assigned and must never
+    * appear on an image that reaches a render pass.
+    */
+   uint64_t id;
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_image, vk.base, VkImage, VK_OBJECT_TYPE_IMAGE)
+
+enum tu_image_id_mode {
+   /* Temporaries for memory-requirement queries: no identity, must never
+    * reach a render pass.
+    */
+   TU_IMAGE_ID_NONE,
+   /* Real images: unique monotonic identity, stable across replays of the
+    * same API call sequence.
+    */
+   TU_IMAGE_ID_ASSIGN,
+   /* Driver-internal scratch attachments (MSRTSS): a shared constant
+    * identity, so that RP hashes don't churn when the scratch images are
+    * reinitialized per framebuffer or per vkCmdBeginRendering.
+    */
+   TU_IMAGE_ID_INTERNAL,
+};
+
+#define TU_IMAGE_ID_INTERNAL_ID UINT64_MAX
 
 template <chip CHIP>
 VkResult
 tu_image_init(struct tu_device *device, struct tu_image *image,
               const VkImageCreateInfo *pCreateInfo, uint64_t modifier,
-              const VkSubresourceLayout *plane_layouts);
+              const VkSubresourceLayout *plane_layouts,
+              enum tu_image_id_mode id_mode);
 
 struct tu_image_view
 {
@@ -71,21 +84,24 @@ struct tu_image_view
    struct tu_image *image; /**< VkImageViewCreateInfo::image */
 
    struct fdl6_view view;
+   struct fdl6_view view_ds_other_aspect; /* for d32s8 separate depth/stencil */
+
+   struct fdl6_view *view_depth;
+   struct fdl6_view *view_stencil;
 
    unsigned char swizzle[4];
-
-   /* for d32s8 separate depth */
-   uint64_t depth_base_addr;
-   uint32_t depth_layer_size;
-   uint32_t depth_pitch;
-
-   /* for d32s8 separate stencil */
-   uint64_t stencil_base_addr;
-   uint32_t stencil_layer_size;
-   uint32_t stencil_pitch;
 };
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_image_view, vk.base, VkImageView,
                                VK_OBJECT_TYPE_IMAGE_VIEW);
+
+static inline const struct fdl6_view *
+tu_image_view_fdl_view(const struct tu_image_view *iview, bool stencil)
+{
+   if (iview->image->vk.format != VK_FORMAT_D32_SFLOAT_S8_UINT)
+      return &iview->view;
+
+   return stencil ? iview->view_stencil : iview->view_depth;
+}
 
 void
 tu_image_view_init(struct tu_device *device,
@@ -123,12 +139,6 @@ tu_layer_flag_address(const struct fdl6_view *iview, uint32_t layer);
 
 void
 tu_cs_image_flag_ref(struct tu_cs *cs, const struct fdl6_view *iview, uint32_t layer);
-
-void
-tu_cs_image_stencil_ref(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer);
-
-void
-tu_cs_image_depth_ref(struct tu_cs *cs, const struct tu_image_view *iview, uint32_t layer);
 
 bool
 tiling_possible(VkFormat format);

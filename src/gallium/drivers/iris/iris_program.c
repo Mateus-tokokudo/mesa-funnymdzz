@@ -45,17 +45,13 @@ vue_layout(bool separate_shader)
 }
 
 #define KEY_INIT(prefix)                                   \
-   .prefix.program_string_id = ish->program_id,            \
-   .prefix.limit_trig_input_range =                        \
-      screen->driconf.limit_trig_input_range
+   .prefix.program_string_id = ish->program_id
 #define BRW_KEY_INIT(base_key, _vue_layout) \
-   .base.limit_trig_input_range = (base_key).limit_trig_input_range, \
    .base.vue_layout = _vue_layout
 
 #ifdef INTEL_USE_ELK
-#define ELK_KEY_INIT(gen, prog_id, limit_trig_input)       \
-   .base.program_string_id = prog_id,                      \
-   .base.limit_trig_input_range = limit_trig_input
+#define ELK_KEY_INIT(gen, prog_id)                         \
+   .base.program_string_id = prog_id
 #endif
 
 struct iris_threaded_compile_job {
@@ -86,7 +82,8 @@ iris_backend_compile(const struct iris_screen *screen,
       struct jay_shader_bin *bin =
          jay_compile(devinfo, mem_ctx, nir,
                      (union brw_any_prog_data *)params->prog_data,
-                     (union brw_any_prog_key *)params->key);
+                     (union brw_any_prog_key *)params->key,
+                     params->archiver);
 
       return bin->kernel;
    } else {
@@ -138,8 +135,7 @@ iris_apply_brw_fs_prog_data(struct iris_compiled_shader *shader,
    iris->uses_depth_w_coefficients  = brw->uses_depth_w_coefficients;
 
    iris->uses_nonperspective_interp_modes = brw->uses_nonperspective_interp_modes;
-
-   iris->is_per_sample = brw_fs_prog_data_is_persample(brw, 0);
+   iris->is_per_sample = brw->persample_dispatch;
 }
 
 static void
@@ -167,6 +163,7 @@ iris_apply_brw_cs_prog_data(struct iris_compiled_shader *shader,
    iris->generate_local_id = brw->generate_local_id;
    iris->walk_order        = brw->walk_order;
    iris->uses_barrier      = brw->uses_barrier;
+   iris->uses_fence        = brw->uses_fence;
    iris->uses_sampler      = brw->uses_sampler;
    iris->prog_mask         = brw->prog_mask;
 
@@ -533,6 +530,7 @@ iris_to_brw_vs_key(const struct iris_screen *screen,
 {
    return (struct brw_vs_prog_key) {
       BRW_KEY_INIT(key->vue.base, key->vue.layout),
+      .max_payload_percent = 90,
    };
 }
 
@@ -600,8 +598,7 @@ iris_to_elk_vs_key(const struct iris_screen *screen,
                    const struct iris_vs_prog_key *key)
 {
    return (struct elk_vs_prog_key) {
-      ELK_KEY_INIT(screen->devinfo->ver, key->vue.base.program_string_id,
-                   key->vue.base.limit_trig_input_range),
+      ELK_KEY_INIT(screen->devinfo->ver, key->vue.base.program_string_id),
 
       /* Don't tell the backend about our clip plane constants, we've
        * already lowered them in NIR and don't want it doing it again.
@@ -615,8 +612,7 @@ iris_to_elk_tcs_key(const struct iris_screen *screen,
                     const struct iris_tcs_prog_key *key)
 {
    return (struct elk_tcs_prog_key) {
-      ELK_KEY_INIT(screen->devinfo->ver, key->vue.base.program_string_id,
-                   key->vue.base.limit_trig_input_range),
+      ELK_KEY_INIT(screen->devinfo->ver, key->vue.base.program_string_id),
       ._tes_primitive_mode = key->_tes_primitive_mode,
       .input_vertices = key->input_vertices,
       .patch_outputs_written = key->patch_outputs_written,
@@ -630,8 +626,7 @@ iris_to_elk_tes_key(const struct iris_screen *screen,
                     const struct iris_tes_prog_key *key)
 {
    return (struct elk_tes_prog_key) {
-      ELK_KEY_INIT(screen->devinfo->ver, key->vue.base.program_string_id,
-                   key->vue.base.limit_trig_input_range),
+      ELK_KEY_INIT(screen->devinfo->ver, key->vue.base.program_string_id),
       .patch_inputs_read = key->patch_inputs_read,
       .inputs_read = key->inputs_read,
    };
@@ -642,8 +637,7 @@ iris_to_elk_gs_key(const struct iris_screen *screen,
                    const struct iris_gs_prog_key *key)
 {
    return (struct elk_gs_prog_key) {
-      ELK_KEY_INIT(screen->devinfo->ver, key->vue.base.program_string_id,
-                   key->vue.base.limit_trig_input_range),
+      ELK_KEY_INIT(screen->devinfo->ver, key->vue.base.program_string_id),
    };
 }
 
@@ -652,8 +646,7 @@ iris_to_elk_fs_key(const struct iris_screen *screen,
                    const struct iris_fs_prog_key *key)
 {
    return (struct elk_fs_prog_key) {
-      ELK_KEY_INIT(screen->devinfo->ver, key->base.program_string_id,
-                   key->base.limit_trig_input_range),
+      ELK_KEY_INIT(screen->devinfo->ver, key->base.program_string_id),
       .nr_color_regions = key->nr_color_regions,
       .alpha_test_replicate_alpha = key->alpha_test_replicate_alpha,
       .alpha_to_coverage = key->alpha_to_coverage ? ELK_ALWAYS : ELK_NEVER,
@@ -671,8 +664,7 @@ iris_to_elk_cs_key(const struct iris_screen *screen,
                    const struct iris_cs_prog_key *key)
 {
    return (struct elk_cs_prog_key) {
-      ELK_KEY_INIT(screen->devinfo->ver, key->base.program_string_id,
-                   key->base.limit_trig_input_range),
+      ELK_KEY_INIT(screen->devinfo->ver, key->base.program_string_id),
    };
 }
 
@@ -1653,7 +1645,6 @@ iris_debug_recompile(struct util_debug_callback *dbg,
       list_first_entry(&ish->variants, struct iris_compiled_shader, link);
 
    check(base, program_string_id);
-   check(base, limit_trig_input_range);
 
    if (info->stage <= MESA_SHADER_GEOMETRY) {
       check(vue, nr_userclip_plane_consts);
@@ -2793,8 +2784,9 @@ iris_compile_fs(struct iris_screen *screen,
    elk_nir_lower_fs_outputs(nir);
 #endif
 
-   int null_rts = brw_nir_fs_needs_null_rt(devinfo, nir,
-                                           key->alpha_to_coverage) ? 1 : 0;
+   int null_rts = key->nr_color_regions == 0 &&
+      brw_nir_fs_needs_null_rt(devinfo, nir,
+                               key->alpha_to_coverage) ? 1 : 0;
 
    struct iris_binding_table bt;
    iris_setup_binding_table(devinfo, nir, &bt,
@@ -2823,7 +2815,6 @@ iris_compile_fs(struct iris_screen *screen,
             .archiver = debug_archiver,
          },
 
-         .allow_spilling = true,
          .max_polygons = UCHAR_MAX,
          .vue_map = vue_map,
       };
@@ -4070,8 +4061,7 @@ iris_fs_barycentric_modes(const struct iris_compiled_shader *shader,
                           enum intel_fs_config pushed_fs_config)
 {
    if (shader->brw_prog_data) {
-      return fs_prog_data_barycentric_modes(brw_fs_prog_data(shader->brw_prog_data),
-                                            pushed_fs_config);
+      return brw_fs_prog_data(shader->brw_prog_data)->barycentric_interp_modes;
    } else {
 #ifdef INTEL_USE_ELK
       assert(shader->elk_prog_data);
@@ -4141,6 +4131,8 @@ iris_compiler_init(struct iris_screen *screen)
       screen->brw = brw_compiler_create(screen, screen->devinfo);
       screen->brw->shader_debug_log = iris_shader_debug_log;
       screen->brw->shader_perf_log = iris_shader_perf_log;
+      screen->brw->limit_trig_input_range =
+         screen->driconf.limit_trig_input_range;
    } else {
 #ifdef INTEL_USE_ELK
       STATIC_ASSERT(IRIS_MAX_DRAW_BUFFERS == ELK_MAX_DRAW_BUFFERS);
@@ -4150,6 +4142,8 @@ iris_compiler_init(struct iris_screen *screen)
       screen->elk->shader_debug_log = iris_shader_debug_log;
       screen->elk->shader_perf_log = iris_shader_perf_log;
       screen->elk->supports_shader_constants = true;
+      screen->elk->limit_trig_input_range =
+         screen->driconf.limit_trig_input_range;
 #else
       UNREACHABLE("no elk support");
 #endif

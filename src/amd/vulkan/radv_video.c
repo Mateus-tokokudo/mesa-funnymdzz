@@ -6,10 +6,6 @@
  * SPDX-License-Identifier: MIT
  */
 
-#ifndef _WIN32
-#include "drm-uapi/amdgpu_drm.h"
-#endif
-
 #include "util/vl_zscan_data.h"
 #include "ac_vcn_dec.h"
 
@@ -135,8 +131,14 @@ static VkResult
 create_intra_only_dpb(struct radv_device *dev, struct radv_physical_device *pdev, struct radv_video_session *vid,
                       const VkVideoProfileInfoKHR *profile, const VkAllocationCallbacks *alloc)
 {
+   VkImageUsageFlags2CreateInfoKHR usage_create_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR,
+      .usage = vid->encode ? VK_IMAGE_USAGE_2_VIDEO_ENCODE_DPB_BIT_KHR : VK_IMAGE_USAGE_2_VIDEO_DECODE_DPB_BIT_KHR,
+   };
+
    VkVideoProfileListInfoKHR profile_list = {
       .sType = VK_STRUCTURE_TYPE_VIDEO_PROFILE_LIST_INFO_KHR,
+      .pNext = &usage_create_info,
       .profileCount = 1,
       .pProfiles = profile,
    };
@@ -144,7 +146,6 @@ create_intra_only_dpb(struct radv_device *dev, struct radv_physical_device *pdev
    VkPhysicalDeviceVideoFormatInfoKHR format_info = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_FORMAT_INFO_KHR,
       .pNext = &profile_list,
-      .imageUsage = vid->encode ? VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR : VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR,
    };
 
    VkVideoFormatPropertiesKHR format_props = {
@@ -667,8 +668,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       ext->maxL1ReferenceCount = ecap->avc.l1_refs;
       ext->maxTemporalLayerCount = ecap->max_temporal_layers;
       ext->expectDyadicTemporalLayerPattern = false;
-      ext->minQp = 0;
-      ext->maxQp = 51;
+      ext->minQp = ecap->min_qp;
+      ext->maxQp = ecap->max_qp;
       ext->prefersGopRemainingFrames = false;
       ext->requiresGopRemainingFrames = false;
       ext->stdSyntaxFlags = VK_VIDEO_ENCODE_H264_STD_CONSTRAINED_INTRA_PRED_FLAG_SET_BIT_KHR |
@@ -702,7 +703,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
 
       ext->flags = VK_VIDEO_ENCODE_H265_CAPABILITY_HRD_COMPLIANCE_BIT_KHR |
                    VK_VIDEO_ENCODE_H265_CAPABILITY_PER_PICTURE_TYPE_MIN_MAX_QP_BIT_KHR |
-                   VK_VIDEO_ENCODE_H265_CAPABILITY_ROW_UNALIGNED_SLICE_SEGMENT_BIT_KHR;
+                   VK_VIDEO_ENCODE_H265_CAPABILITY_ROW_UNALIGNED_SLICE_SEGMENT_BIT_KHR |
+                   VK_VIDEO_ENCODE_H265_CAPABILITY_MULTIPLE_SLICE_SEGMENTS_PER_TILE_BIT_KHR;
       ext->maxLevelIdc = ecap->max_level;
       ext->maxSliceSegmentCount = ecap->max_slices;
       ext->maxTiles.width = 1;
@@ -716,8 +718,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       ext->maxL1ReferenceCount = ecap->hevc.l1_refs;
       ext->maxSubLayerCount = ecap->max_temporal_layers;
       ext->expectDyadicTemporalSubLayerPattern = false;
-      ext->minQp = 0;
-      ext->maxQp = 51;
+      ext->minQp = ecap->min_qp;
+      ext->maxQp = ecap->max_qp;
       ext->prefersGopRemainingFrames = false;
       ext->requiresGopRemainingFrames = false;
       ext->stdSyntaxFlags = VK_VIDEO_ENCODE_H265_STD_CONSTRAINED_INTRA_PRED_FLAG_SET_BIT_KHR |
@@ -783,8 +785,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       ext->maxTemporalLayerCount = ecap->max_temporal_layers;
       ext->maxSpatialLayerCount = 1;
       ext->maxOperatingPoints = ecap->max_temporal_layers;
-      ext->minQIndex = 1;
-      ext->maxQIndex = 255;
+      ext->minQIndex = ecap->min_qp;
+      ext->maxQIndex = ecap->max_qp;
       ext->prefersGopRemainingFrames = false;
       ext->requiresGopRemainingFrames = false;
       ext->stdSyntaxFlags = 0;
@@ -806,6 +808,18 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
    return VK_SUCCESS;
 }
 
+static VkImageUsageFlags2KHR
+vk_video_format_info_usage(const VkPhysicalDeviceVideoFormatInfoKHR *info)
+{
+   const VkImageUsageFlags2CreateInfoKHR *usage_create_info =
+      vk_find_struct_const(info->pNext, IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR);
+   if (usage_create_info) {
+      return usage_create_info->usage;
+   } else {
+      return info->imageUsage;
+   }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
                                                const VkPhysicalDeviceVideoFormatInfoKHR *pVideoFormatInfo,
@@ -813,25 +827,23 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
                                                VkVideoFormatPropertiesKHR *pVideoFormatProperties)
 {
    VK_FROM_HANDLE(radv_physical_device, pdev, physicalDevice);
+   const VkImageUsageFlags2KHR image_usage = vk_video_format_info_usage(pVideoFormatInfo);
 
-   if ((pVideoFormatInfo->imageUsage &
-        (VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR |
-         VK_IMAGE_USAGE_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR)) &&
+   if ((image_usage & (VK_IMAGE_USAGE_2_VIDEO_ENCODE_SRC_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_ENCODE_DPB_BIT_KHR |
+                       VK_IMAGE_USAGE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR)) &&
        !pdev->video_encode_enabled)
       return VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR;
 
    /* Cannot be a QP map and other video enc/dec usages, as they are totally different formats. */
-   if ((pVideoFormatInfo->imageUsage & VK_IMAGE_USAGE_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR) &&
-       (pVideoFormatInfo->imageUsage &
-        (VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR |
-         VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR)))
+   if ((image_usage & VK_IMAGE_USAGE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR) &&
+       (image_usage & (VK_IMAGE_USAGE_2_VIDEO_ENCODE_SRC_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_ENCODE_DPB_BIT_KHR |
+                       VK_IMAGE_USAGE_2_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_DECODE_DST_BIT_KHR)))
       return VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR;
 
    /* VCN < 5 requires separate allocates for DPB and decode video. */
    if (pdev->info.vcn_ip_version < VCN_5_0_0 &&
-       (pVideoFormatInfo->imageUsage &
-        (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR)) ==
-          (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR))
+       (image_usage & (VK_IMAGE_USAGE_2_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_DECODE_DST_BIT_KHR)) ==
+          (VK_IMAGE_USAGE_2_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_DECODE_DST_BIT_KHR))
       return VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR;
 
    VkFormat formats[2] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
@@ -845,7 +857,7 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
       const VkVideoEncodeProfileRgbConversionInfoVALVE *rgbProfile =
          vk_find_struct_const(profile, VIDEO_ENCODE_PROFILE_RGB_CONVERSION_INFO_VALVE);
       bool rgb = rgbProfile && rgbProfile->performEncodeRgbConversion &&
-                 (pVideoFormatInfo->imageUsage & VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR);
+                 (image_usage & VK_IMAGE_USAGE_2_VIDEO_ENCODE_SRC_BIT_KHR);
       struct ac_video_dec_codec_caps *dcap = NULL;
       struct ac_video_enc_codec_caps *ecap = NULL;
 
@@ -859,7 +871,7 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
       radv_video_get_caps(pdev, profile->videoCodecOperation, &dcap, &ecap);
 
       VkFormat profile_formats[2] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
-      if (pVideoFormatInfo->imageUsage & VK_IMAGE_USAGE_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR) {
+      if (image_usage & VK_IMAGE_USAGE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR) {
          /* All profiles must share the same qp_map texel size. */
          if (qp_map_texel_size != 0 && qp_map_texel_size != ecap->qp_map_texel_size)
             return VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR;
@@ -903,11 +915,11 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
    if (formats[0] == VK_FORMAT_UNDEFINED)
       return VK_ERROR_IMAGE_USAGE_NOT_SUPPORTED_KHR;
 
-   const bool qp_map = pVideoFormatInfo->imageUsage & VK_IMAGE_USAGE_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR;
-   const bool dpb = pVideoFormatInfo->imageUsage &
-                    (VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR);
-   const bool src_dst = pVideoFormatInfo->imageUsage &
-                        (VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR);
+   const bool qp_map = image_usage & VK_IMAGE_USAGE_2_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR;
+   const bool dpb =
+      image_usage & (VK_IMAGE_USAGE_2_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_ENCODE_DPB_BIT_KHR);
+   const bool src_dst =
+      image_usage & (VK_IMAGE_USAGE_2_VIDEO_DECODE_DST_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_ENCODE_SRC_BIT_KHR);
    VkImageTiling tiling[3];
    uint32_t num_tiling = 0;
 
@@ -919,13 +931,13 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
    if ((src_dst || qp_map) && pdev->info.gfx_level >= GFX9)
       tiling[num_tiling++] = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
 
-   VkImageUsageFlags usage_flags = pVideoFormatInfo->imageUsage;
+   VkImageUsageFlags2KHR usage_flags = image_usage;
 
-   if (usage_flags & VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR)
-      usage_flags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+   if (usage_flags & VK_IMAGE_USAGE_2_VIDEO_DECODE_DST_BIT_KHR)
+      usage_flags |= VK_IMAGE_USAGE_2_TRANSFER_SRC_BIT_KHR | VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR;
 
-   if (usage_flags & VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR)
-      usage_flags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+   if (usage_flags & VK_IMAGE_USAGE_2_VIDEO_ENCODE_SRC_BIT_KHR)
+      usage_flags |= VK_IMAGE_USAGE_2_TRANSFER_DST_BIT_KHR;
 
    VK_OUTARRAY_MAKE_TYPED(VkVideoFormatPropertiesKHR, out, pVideoFormatProperties, pVideoFormatPropertyCount);
 
@@ -943,8 +955,8 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
             p->componentMapping.a = VK_COMPONENT_SWIZZLE_IDENTITY;
             p->imageCreateFlags = 0;
             if (src_dst || qp_map)
-               p->imageCreateFlags |=
-                  VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | VK_IMAGE_CREATE_ALIAS_BIT;
+               p->imageCreateFlags |= VK_IMAGE_CREATE_2_MUTABLE_FORMAT_BIT_KHR |
+                                      VK_IMAGE_CREATE_2_EXTENDED_USAGE_BIT_KHR | VK_IMAGE_CREATE_2_ALIAS_BIT_KHR;
             p->imageType = VK_IMAGE_TYPE_2D;
             p->imageTiling = tiling[j];
             p->imageUsageFlags = usage_flags;
@@ -1846,7 +1858,8 @@ select_tier(struct radv_device *device, struct radv_video_session *vid, const st
    struct radv_image_plane *luma = &dst_iv->image->planes[0];
 
    if (vid->dec->tiers & AC_VIDEO_DEC_TIER3) {
-      VkImageUsageFlags coincide = VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_DECODE_DST_BIT_KHR;
+      VkImageUsageFlags2KHR coincide =
+         VK_IMAGE_USAGE_2_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_2_VIDEO_DECODE_DST_BIT_KHR;
       if (!luma->surface.is_linear && (dst_iv->image->vk.usage & coincide) == coincide)
          return AC_VIDEO_DEC_TIER3;
    }

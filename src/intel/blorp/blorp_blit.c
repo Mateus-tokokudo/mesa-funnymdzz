@@ -29,12 +29,145 @@
 #include "dev/intel_debug.h"
 #include "dev/intel_device_info.h"
 
-#include "util/format_rgb9e5.h"
 #include "util/u_math.h"
 
 #define FILE_DEBUG_FLAG DEBUG_BLORP
 
 static const bool split_blorp_blit_debug = false;
+
+#pragma pack(push, 1)
+struct blorp_blit_prog_key
+{
+   struct blorp_base_key base;
+
+   isl_surf_usage_flags_t dst_usage;
+
+   enum isl_aux_usage tex_aux_usage;
+
+   /* Actual number of samples per pixel in the source image. */
+   unsigned src_samples;
+
+   /* Actual number of samples per pixel in the destination image. */
+   unsigned dst_samples;
+
+   /* Number of samples per pixel that have been configured in the surface
+    * state for texturing from.
+    */
+   unsigned tex_samples;
+
+   /* Number of samples per pixel that have been configured in the render
+    * target.
+    */
+   unsigned rt_samples;
+
+   /* Actual MSAA layout used by the source image. */
+   enum isl_msaa_layout src_layout;
+
+   /* Actual MSAA layout used by the destination image. */
+   enum isl_msaa_layout dst_layout;
+
+   /* MSAA layout that has been configured in the surface state for texturing
+    * from.
+    */
+   enum isl_msaa_layout tex_layout;
+
+   /* MSAA layout that has been configured in the render target. */
+   enum isl_msaa_layout rt_layout;
+
+   /* The swizzle to apply to the source in the shader */
+   struct isl_swizzle src_swizzle;
+
+   /* The swizzle to apply to the destination in the shader */
+   struct isl_swizzle dst_swizzle;
+
+   /* The format of the source if format-specific workarounds are needed
+    * and 0 (ISL_FORMAT_R32G32B32A32_FLOAT) if the destination is natively
+    * renderable.
+    */
+   enum isl_format src_format;
+
+   /* The format of the destination if format-specific workarounds are needed
+    * and 0 (ISL_FORMAT_R32G32B32A32_FLOAT) if the destination is natively
+    * renderable.
+    */
+   enum isl_format dst_format;
+
+   enum blorp_filter filter;
+
+   /* Scale factors between the pixel grid and the grid of samples. We're
+    * using grid of samples for bilinear filtering in multisample scaled blits.
+    */
+   float x_scale;
+   float y_scale;
+
+   /* If a compute shader is used, this is the local size y dimension.
+    */
+   uint8_t local_y;
+
+   /* Type of the data to be read from the texture (one of
+    * nir_type_(int|uint|float)).
+    */
+   nir_alu_type texture_data_type;
+
+   /* True if the source requires normalized coordinates */
+   bool src_coords_normalized;
+
+   /* Whether or not the format workarounds are a bitcast operation */
+   bool format_bit_cast;
+
+   /** True if we need to perform SINT -> UINT clamping. */
+   bool sint32_to_uint;
+
+   /** True if we need to perform UINT -> SINT clamping. */
+   bool uint32_to_sint;
+
+   /* True if the source image is W tiled.  If true, the surface state for the
+    * source image must be configured as Y tiled, and tex_samples must be 0.
+    */
+   bool src_tiled_w;
+
+   /* True if the destination image is W tiled.  If true, the surface state
+    * for the render target must be configured as Y tiled, and rt_samples must
+    * be 0.
+    */
+   bool dst_tiled_w;
+
+   /* True if the destination is an RGB format.  If true, the surface state
+    * for the render target must be configured as red with three times the
+    * normal width.  We need to do this because you cannot render to
+    * non-power-of-two formats.
+    */
+   bool dst_rgb;
+
+   /* True if the rectangle being sent through the rendering pipeline might be
+    * larger than the destination rectangle, so the WM program should kill any
+    * pixels that are outside the destination rectangle.
+    */
+   bool use_kill;
+
+   /**
+    * True if the WM program should be run in MSDISPMODE_PERSAMPLE with more
+    * than one sample per pixel.
+    */
+   bool persample_msaa_dispatch;
+
+   /* True if this blit operation may involve intratile offsets on the source.
+    * In this case, we need to add the offset before texturing.
+    */
+   bool need_src_offset;
+
+   /* True if this blit operation is unpacking the last few rows of the 2D image
+    * from a 1D buffer. This is part of a workaround for performing buffer-to-image
+    * copies when the source is straddling an extra page due to a misaligned cache.
+    */
+   bool need_src_buffer;
+
+   /* True if this blit operation may involve intratile offsets on the
+    * destination.  In this case, we need to add the offset to gl_FragCoord.
+    */
+   bool need_dst_offset;
+};
+#pragma pack(pop)
 
 struct blorp_blit_vars {
    /* Input values from blorp_wm_inputs */
@@ -1624,6 +1757,7 @@ blorp_get_blit_kernel_fs(struct blorp_batch *batch,
                            p.kernel, p.kernel_size,
                            p.prog_data, p.prog_data_size,
                            &params->wm_prog_kernel, &params->fs_prog_data);
+   assert(result);
 
    ralloc_free(mem_ctx);
    return result;
@@ -1660,6 +1794,7 @@ blorp_get_blit_kernel_cs(struct blorp_batch *batch,
                            p.kernel, p.kernel_size,
                            p.prog_data, p.prog_data_size,
                            &params->cs_prog_kernel, &params->cs_prog_data);
+   assert(result);
 
    ralloc_free(mem_ctx);
    return result;
@@ -2467,14 +2602,20 @@ try_blorp_blit(struct blorp_batch *batch,
    }
 
    if (compute) {
-      if (!blorp_get_blit_kernel_cs(batch, params, key))
+      if (!blorp_get_blit_kernel_cs(batch, params, key)) {
+         mesa_loge("%s: failed to get CS kernel", __func__);
          return 0;
+      }
    } else {
-      if (!blorp_get_blit_kernel_fs(batch, params, key))
+      if (!blorp_get_blit_kernel_fs(batch, params, key)) {
+         mesa_loge("%s: failed to get FS kernel", __func__);
          return 0;
+      }
 
-      if (!blorp_ensure_sf_program(batch, params))
+      if (!blorp_ensure_sf_program(batch, params)) {
+         mesa_loge("%s: failed to get SF kernel", __func__);
          return 0;
+      }
    }
 
    unsigned result = 0;
@@ -2717,8 +2858,7 @@ blorp_blit_supports_compute(struct blorp_context *blorp,
              dst_aux_usage == ISL_AUX_USAGE_MCS ||
              dst_aux_usage == ISL_AUX_USAGE_NONE;
    } else if (blorp->isl_dev->info->ver >= 12) {
-      return dst_aux_usage == ISL_AUX_USAGE_FCV_CCS_E ||
-             dst_aux_usage == ISL_AUX_USAGE_CCS_E ||
+      return dst_aux_usage == ISL_AUX_USAGE_CCS_E ||
              dst_aux_usage == ISL_AUX_USAGE_NONE;
    } else if (blorp->isl_dev->info->ver >= 7) {
       return dst_aux_usage == ISL_AUX_USAGE_NONE;
@@ -2736,8 +2876,8 @@ blorp_blitter_supports_aux(const struct intel_device_info *devinfo,
    case ISL_AUX_USAGE_NONE:
       return true;
    case ISL_AUX_USAGE_CCS_E:
-   case ISL_AUX_USAGE_FCV_CCS_E:
    case ISL_AUX_USAGE_STC_CCS:
+   case ISL_AUX_USAGE_ZCS:
       return devinfo->verx10 >= 125;
    default:
       return false;
@@ -2843,18 +2983,17 @@ blorp_blit(struct blorp_batch *batch,
    const struct isl_format_layout *src_fmtl =
       isl_format_get_layout(params.src.view.format);
 
-   struct blorp_blit_prog_key key = {
-      .base = BLORP_BASE_KEY_INIT(BLORP_SHADER_TYPE_BLIT),
-      .base.shader_pipeline = compute ? BLORP_SHADER_PIPELINE_COMPUTE :
-                                        BLORP_SHADER_PIPELINE_RENDER,
-      .filter = filter,
-      .sint32_to_uint = src_fmtl->channels.r.bits == 32 &&
-                        isl_format_has_sint_channel(params.src.view.format) &&
-                        isl_format_has_uint_channel(params.dst.view.format),
-      .uint32_to_sint = src_fmtl->channels.r.bits == 32 &&
-                        isl_format_has_uint_channel(params.src.view.format) &&
-                        isl_format_has_sint_channel(params.dst.view.format),
-   };
+   struct blorp_blit_prog_key key;
+   BLORP_KEY_INIT(key, BLORP_SHADER_TYPE_BLIT,
+                  (compute ? BLORP_SHADER_PIPELINE_COMPUTE :
+                             BLORP_SHADER_PIPELINE_RENDER));
+   key.filter = filter;
+   key.sint32_to_uint = src_fmtl->channels.r.bits == 32 &&
+                     isl_format_has_sint_channel(params.src.view.format) &&
+                     isl_format_has_uint_channel(params.dst.view.format);
+   key.uint32_to_sint = src_fmtl->channels.r.bits == 32 &&
+                     isl_format_has_uint_channel(params.src.view.format) &&
+                     isl_format_has_sint_channel(params.dst.view.format);
 
    params.shader_type = key.base.shader_type;
    params.shader_pipeline = key.base.shader_pipeline;
@@ -3397,14 +3536,13 @@ blorp_copy(struct blorp_batch *batch,
    blorp_surface_info_init(batch, &params.dst, dst_surf, dst_level,
                            dst_layer, ISL_FORMAT_UNSUPPORTED, true);
 
-   struct blorp_blit_prog_key key = {
-      .base = BLORP_BASE_KEY_INIT(BLORP_SHADER_TYPE_COPY),
-      .base.shader_pipeline = compute ? BLORP_SHADER_PIPELINE_COMPUTE :
-                                        BLORP_SHADER_PIPELINE_RENDER,
-      .filter = BLORP_FILTER_NONE,
-      .need_src_offset = src_surf->tile_x_sa || src_surf->tile_y_sa,
-      .need_dst_offset = dst_surf->tile_x_sa || dst_surf->tile_y_sa,
-   };
+   struct blorp_blit_prog_key key;
+   BLORP_KEY_INIT(key, BLORP_SHADER_TYPE_COPY,
+                  (compute ? BLORP_SHADER_PIPELINE_COMPUTE :
+                             BLORP_SHADER_PIPELINE_RENDER));
+   key.filter = BLORP_FILTER_NONE;
+   key.need_src_offset = src_surf->tile_x_sa || src_surf->tile_y_sa;
+   key.need_dst_offset = dst_surf->tile_x_sa || dst_surf->tile_y_sa;
 
    params.shader_type = key.base.shader_type;
    params.shader_pipeline = key.base.shader_pipeline;
@@ -3417,6 +3555,7 @@ blorp_copy(struct blorp_batch *batch,
    assert(params.src.aux_usage == ISL_AUX_USAGE_NONE ||
           params.src.aux_usage == ISL_AUX_USAGE_HIZ ||
           params.src.aux_usage == ISL_AUX_USAGE_HIZ_CCS_WT ||
+          params.src.aux_usage == ISL_AUX_USAGE_ZCS ||
           params.src.aux_usage == ISL_AUX_USAGE_MCS ||
           params.src.aux_usage == ISL_AUX_USAGE_MCS_CCS ||
           params.src.aux_usage == ISL_AUX_USAGE_CCS_E ||

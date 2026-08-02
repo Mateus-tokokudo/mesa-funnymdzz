@@ -65,7 +65,9 @@ jobs:
             --no-install-recommends \
             bison \
             build-essential \
+            bindgen \
             ca-certificates \
+            cargo \
             cmake \
             dpkg-dev \
             flex \
@@ -95,6 +97,7 @@ jobs:
             python3-pip \
             python3-setuptools \
             python3-yaml \
+            rustc \
             spirv-tools \
             zlib1g-dev
           LLVM_MAJOR="$(llvm-config --version | cut -d. -f1)"
@@ -116,6 +119,7 @@ jobs:
           pacman --disable-sandbox -Syu --noconfirm --needed \
             base-devel \
             bison \
+            bindgen \
             clang \
             cmake \
             flex \
@@ -136,6 +140,7 @@ jobs:
             python-packaging \
             python-ply \
             python-pyyaml \
+            rust \
             spirv-llvm-translator \
             spirv-tools \
             vulkan-icd-loader \
@@ -167,6 +172,7 @@ jobs:
             -Dmesa-clc=enabled \
             -Dopengl=false \
             -Dpanfrost-kmds=kbase,panthor \
+            -Dpanfrost-rust=true \
             -Dplatforms=x11 \
             -Dprecomp-compiler=enabled \
             -Dshared-glapi=disabled \

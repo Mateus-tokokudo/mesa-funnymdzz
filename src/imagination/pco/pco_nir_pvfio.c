@@ -15,6 +15,7 @@
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_format_convert.h"
+#include "pvr_iface.h"
 #include "pco.h"
 #include "pco_builder.h"
 #include "pco_internal.h"
@@ -517,9 +518,6 @@ static bool lower_pfo(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
 static bool lower_isp_fb(nir_builder *b, struct pfo_state *state)
 {
-   if (b->shader->info.internal)
-      return false;
-
    bool has_depth_feedback = !!state->depth_feedback_src;
    if (b->shader->info.writes_memory && !has_depth_feedback) {
       nir_variable *var_pos = nir_get_variable_with_location(b->shader,
@@ -605,7 +603,7 @@ static bool sink_outputs(nir_shader *shader, struct pfo_state *state)
 
 static bool z_replicate(nir_shader *shader, struct pfo_state *state)
 {
-   if (shader->info.internal || state->fs->z_replicate == ~0u)
+   if (state->fs->z_replicate == ~0u)
       return false;
 
    assert(!nir_find_variable_with_location(shader,
@@ -677,15 +675,15 @@ static bool lower_demote_samples(nir_builder *b,
 
 bool pco_nir_lower_alpha_to_coverage(nir_shader *shader)
 {
-   if (shader->info.internal)
-      return false;
-
    nir_builder b = nir_builder_create(nir_shader_get_entrypoint(shader));
    b.cursor =
       nir_before_block(nir_start_block(nir_shader_get_entrypoint(shader)));
    nir_def *a2c_enabled = nir_ine_imm(
       &b,
-      nir_ubitfield_extract_imm(&b, nir_load_fs_meta_pco(&b), 25, 1),
+      nir_ubitfield_extract_imm(&b,
+                                nir_load_fs_meta_pco(&b),
+                                PVR_FS_META_ALPHA_TO_COVERAGE_OFFSET,
+                                PVR_FS_META_ALPHA_TO_COVERAGE_LENGTH),
       0);
 
    nir_lower_alpha_to_coverage(shader, true, a2c_enabled);
@@ -720,10 +718,12 @@ static bool lower_alpha_to_one(nir_builder *b,
 
    b->cursor = nir_before_instr(&intr->instr);
 
-   /* TODO: define or other way of representing bit 0 of metadata... */
    nir_def *alpha_to_one_enabled =
       nir_ine_imm(b,
-                  nir_ubitfield_extract_imm(b, nir_load_fs_meta_pco(b), 0, 1),
+                  nir_ubitfield_extract_imm(b,
+                                            nir_load_fs_meta_pco(b),
+                                            PVR_FS_META_ALPHA_TO_ONE_OFFSET,
+                                            PVR_FS_META_ALPHA_TO_ONE_LENGTH),
                   0);
 
    nir_def *alpha = nir_bcsel(b,
@@ -756,7 +756,10 @@ static bool lower_load_sample_mask(nir_builder *b,
    b->cursor = nir_before_instr(&intr->instr);
 
    nir_def *smp_msk =
-      nir_ubitfield_extract_imm(b, nir_load_fs_meta_pco(b), 9, 16);
+      nir_ubitfield_extract_imm(b,
+                                nir_load_fs_meta_pco(b),
+                                PVR_FS_META_SAMPLE_MASK_OFFSET,
+                                PVR_FS_META_SAMPLE_MASK_LENGTH);
    smp_msk = nir_iand(b, smp_msk, nir_load_savmsk_vm_pco(b));
    nir_def_rewrite_uses(&intr->def, smp_msk);
    nir_instr_remove(&intr->instr);
@@ -785,14 +788,14 @@ static bool lower_color_write_enable(nir_builder *b,
    b->cursor = nir_before_instr(&intr->instr);
 
    /* TODO: nir op that returns bool based on whether a bit is set. */
-   /* TODO: define for 1 */
-   nir_def *color_write_enabled =
-      nir_ine_imm(b,
-                  nir_ubitfield_extract_imm(b,
-                                            nir_load_fs_meta_pco(b),
-                                            1 + color_write_index,
-                                            1),
-                  0);
+   nir_def *color_write_enabled = nir_ine_imm(
+      b,
+      nir_ubitfield_extract_imm(b,
+                                nir_load_fs_meta_pco(b),
+                                PVR_FS_META_COLOR_WRITE_ENABLE_OFFSET +
+                                   color_write_index,
+                                1u),
+      0);
 
    nir_def *prev_input =
       nir_load_output(b,
@@ -859,10 +862,17 @@ bool pco_nir_pfo(nir_shader *shader, pco_fs_data *fs)
                                           lower_pfo,
                                           nir_metadata_control_flow,
                                           &state);
-   progress |= lower_isp_fb(&b, &state);
+
+   /* TODO: Move this check and others to outside the pass to align with
+    * rest of the codebase.
+    */
+   if (!shader->info.internal)
+      progress |= lower_isp_fb(&b, &state);
 
    progress |= sink_outputs(shader, &state);
-   progress |= z_replicate(shader, &state);
+
+   if (!shader->info.internal)
+      progress |= z_replicate(shader, &state);
 
    progress |= nir_shader_intrinsics_pass(shader,
                                           lower_load_sample_mask,
@@ -1022,8 +1032,6 @@ check_psiz_write(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 bool pco_nir_point_size(nir_shader *shader)
 {
    assert(shader->info.stage == MESA_SHADER_VERTEX);
-   if (shader->info.internal)
-      return false;
 
    bool writes_psiz = false;
    nir_shader_intrinsics_pass(shader,
@@ -1041,9 +1049,10 @@ bool pco_nir_point_size(nir_shader *shader)
                                   VARYING_SLOT_PSIZ,
                                   glsl_float_type());
 
+   nir_function_impl *entrypoint = nir_shader_get_entrypoint(shader);
    /* Add a point size write. */
    nir_builder b = nir_builder_at(
-      nir_after_block(nir_impl_last_block(nir_shader_get_entrypoint(shader))));
+      nir_after_block(nir_impl_last_block(entrypoint)));
 
    nir_store_output(&b,
                     nir_imm_float(&b, PVR_POINT_SIZE_RANGE_MIN),
@@ -1058,7 +1067,8 @@ bool pco_nir_point_size(nir_shader *shader)
                        .num_slots = 1,
                     });
 
-   return true;
+   return nir_progress(true, entrypoint,
+                nir_metadata_control_flow);
 }
 
 static bool lower_front_face(nir_builder *b, nir_intrinsic_instr *intr)
@@ -1133,15 +1143,12 @@ bool pco_nir_lower_vs_intrinsics(nir_shader *shader)
                                      NULL);
 }
 
-bool pco_nir_lower_clip_cull_vars(nir_shader *shader)
+void pco_nir_lower_clip_cull_vars(nir_shader *shader)
 {
-   if (shader->info.internal)
-      return false;
-
    unsigned clip_cull_comps = shader->info.clip_distance_array_size +
                               shader->info.cull_distance_array_size;
    if (!clip_cull_comps)
-      return false;
+      return;
 
    /* Remove the old variables. */
    const gl_varying_slot clip_cull_locations[] = {
@@ -1171,10 +1178,6 @@ bool pco_nir_lower_clip_cull_vars(nir_shader *shader)
                                         VARYING_SLOT_CLIP_DIST1,
                                         glsl_vec_type(clip_cull_comps - 4));
    }
-
-   nir_metadata_invalidate(shader);
-
-   return true;
 }
 
 static bool
@@ -1264,7 +1267,7 @@ bool pco_nir_link_clip_cull_vars(nir_shader *producer, nir_shader *consumer)
 
    nir_shader_intrinsics_pass(producer,
                               clone_clip_cull_stores,
-                              nir_metadata_block_index | nir_metadata_dominance,
+                              nir_metadata_control_flow,
                               clone_var);
 
    clone_var =
@@ -1466,7 +1469,7 @@ bool pco_nir_link_multiview(nir_shader *producer,
    /* Lower view index loads in the consumer. */
    nir_shader_intrinsics_pass(consumer,
                               lower_load_view_index_fs,
-                              nir_metadata_all,
+                              nir_metadata_control_flow,
                               view_index_var);
 
    return true;

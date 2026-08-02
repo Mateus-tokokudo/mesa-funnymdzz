@@ -279,8 +279,8 @@ tu_autotune::get_env_config()
 
       if (algo_str)
          algo_strv = algo_str;
-      else if (device->instance->autotune_algo)
-         algo_strv = device->instance->autotune_algo;
+      else if (device->instance->drirc.perf.autotune_algo)
+         algo_strv = device->instance->drirc.perf.autotune_algo;
 
       if (!algo_strv.empty()) {
          if (algo_strv == "bandwidth") {
@@ -425,6 +425,13 @@ struct PACKED tu_autotune::rp_gpu_data {
    alignas(16) uint64_t samples_end;
    uint64_t ts_start;
    uint64_t ts_end;
+   /* Binning pass timestamps, only written for GMEM with HW binning. Zero for
+    * SYSMEM or GMEM without binning. Added to (ts_end - ts_start) to get the
+    * true total GMEM cost, including the binning pass that precedes fragment
+    * rendering.  For concurrent binning (CB) this slightly over-counts since
+    * BV and BR overlap, but that is acceptable for the autotuner's purposes. */
+   uint64_t ts_binning_start;
+   uint64_t ts_binning_end;
 };
 
 /* Per-tile values for GMEM rendering, this structure is appended to the end of rp_gpu_data for each tile. */
@@ -639,7 +646,7 @@ struct tu_autotune::rp_entry {
    {
       assert(config.test(metric_flag::TS));
       rp_gpu_data &gpu = get_gpu_data();
-      return gpu.ts_end - gpu.ts_start;
+      return (gpu.ts_end - gpu.ts_start) + (gpu.ts_binning_end - gpu.ts_binning_start);
    }
 
    /* The amount of cycles spent in the longest tile. This is used to calculate the average draw duration for
@@ -665,6 +672,20 @@ struct tu_autotune::rp_entry {
    }
 
    /** CS Emission **/
+
+   void emit_binning_start(struct tu_cs *cs)
+   {
+      assert(map && bo.iova);
+      if (config.test(metric_flag::TS))
+         emit_metric_timestamp(cs, bo.iova + offsetof(rp_gpu_data, ts_binning_start));
+   }
+
+   void emit_binning_end(struct tu_cs *cs)
+   {
+      assert(map && bo.iova);
+      if (config.test(metric_flag::TS))
+         emit_metric_timestamp(cs, bo.iova + offsetof(rp_gpu_data, ts_binning_end));
+   }
 
    void emit_rp_start(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    {
@@ -813,7 +834,12 @@ tu_autotune::rp_key::rp_key(const struct tu_render_pass *pass,
     */
 
    struct PACKED packed_att_properties {
-      uint64_t iova;
+      /* Use img_id (stable monotonic creation counter) + view offset rather than
+       * IOVA, so that the hash is consistent across separate process runs of the
+       * same API call sequence (e.g. apitrace replay).
+       */
+      uint64_t img_id;
+      uint32_t view_offset;
       bool load;
       bool store;
       bool load_stencil;
@@ -827,8 +853,14 @@ tu_autotune::rp_key::rp_key(const struct tu_render_pass *pass,
       *ptr++ = framebuffer->layers;
 
       for (unsigned i = 0; i < pass->attachment_count; i++) {
+         /* Every image reaching a render pass must have an identity (see
+          * tu_image_id_mode); 0 means a new image path missed assigning one.
+          */
+         assert(cmd->state.attachments[i]->image->id != 0);
+
          packed_att_properties props = {
-            .iova = cmd->state.attachments[i]->image->iova + cmd->state.attachments[i]->view.offset,
+            .img_id = cmd->state.attachments[i]->image->id,
+            .view_offset = cmd->state.attachments[i]->view.offset,
             .load = pass->attachments[i].load,
             .store = pass->attachments[i].store,
             .load_stencil = pass->attachments[i].load_stencil,
@@ -847,7 +879,8 @@ tu_autotune::rp_key::rp_key(const struct tu_render_pass *pass,
     * cases, while only extreme cases need to allocate on the heap.
     */
    size_t data_count = 3 + (pass->attachment_count * sizeof(packed_att_properties) / sizeof(uint32_t));
-   constexpr size_t STACK_MAX_DATA_COUNT = 3 + (5 * 3); /* in u32 units. */
+   constexpr size_t STACK_MAX_DATA_COUNT =
+      3 + (5 * (sizeof(packed_att_properties) / sizeof(uint32_t))); /* in u32 units, up to 5 attachments. */
 
    if (data_count <= STACK_MAX_DATA_COUNT) {
       /* If the data is small enough, we can use the stack. */
@@ -1633,41 +1666,20 @@ tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
    tu_bo_suballocator_init(&suballoc, device, 128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE, "autotune_suballoc");
 
    if (supports_preempt_latency_tracking()) {
-      uint32_t group_count;
-      const struct fd_perfcntr_group *groups = fd_perfcntrs(&device->physical_device->dev_id, &group_count);
       const char *fail_reason = nullptr;
 
-      const fd_perfcntr_group *cp_group = nullptr;
-      for (uint32_t i = 0; i < group_count; i++) {
-         if (strcmp(groups[i].name, "CP") == 0) {
-            cp_group = &groups[i];
-            break;
-         }
-      }
+      const fd_perfcntr_group *cp_group = fd_perfcntrs_group(&device->physical_device->dev_id, "CP");
 
       if (cp_group) {
-         auto get_perfcntr_countable = [](const struct fd_perfcntr_group *group,
-                                          const char *name) -> const struct fd_perfcntr_countable * {
-            for (uint32_t i = 0; i < group->num_countables; i++) {
-               if (strcmp(group->countables[i].name, name) == 0)
-                  return &group->countables[i];
-            }
-
-            return nullptr;
-         };
-
-         auto preemption_latency_countable = get_perfcntr_countable(cp_group, "PERF_CP_PREEMPTION_REACTION_DELAY");
-         auto always_count_countable = get_perfcntr_countable(cp_group, "PERF_CP_ALWAYS_COUNT");
+         preemption_latency_countable = fd_perfcntrs_countable(cp_group, "PERF_CP_PREEMPTION_REACTION_DELAY");
+         always_count_countable = fd_perfcntrs_countable(cp_group, "PERF_CP_ALWAYS_COUNT");
          if (preemption_latency_countable && always_count_countable) {
-            if (cp_group->num_counters >= 2) {
-               preemption_latency_selector_reg = cp_group->counters[0].select_reg;
-               preemption_latency_selector = preemption_latency_countable->selector;
-               preemption_latency_counter_reg_lo = cp_group->counters[0].counter_reg_lo;
+            preemption_latency_counter =
+               fd_perfcntr_reserve(device->perfcntrs, cp_group, preemption_latency_countable);
+            always_count_counter =
+               fd_perfcntr_reserve(device->perfcntrs, cp_group, always_count_countable);
 
-               always_count_selector_reg = cp_group->counters[1].select_reg;
-               always_count_selector = always_count_countable->selector;
-               always_count_counter_reg_lo = cp_group->counters[1].counter_reg_lo;
-            } else {
+            if (!preemption_latency_counter || !always_count_counter) {
                fail_reason = "not enough counters in CP group for preemption latency tracking";
             }
          } else {
@@ -1700,6 +1712,9 @@ tu_autotune::~tu_autotune()
 
    active_batches.clear();
    tu_bo_suballocator_finish(&suballoc);
+
+   fd_perfcntr_release(device->perfcntrs, preemption_latency_counter);
+   fd_perfcntr_release(device->perfcntrs, always_count_counter);
 }
 
 tu_autotune::cmd_buf_ctx::cmd_buf_ctx(struct tu_autotune &autotune): batch(autotune.create_batch())
@@ -1793,6 +1808,12 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
     * because if SYSMEM is actually faster then they could've just not used the fragment density map.
     */
    if (pass->has_fdm)
+      return render_mode::GMEM;
+
+   /* There is a special HW path for unresolves into GMEM, and all known users of MSRTSS are VR apps made for tilers,
+    * so they would expect for MSRTSS RPs to be in GMEM mode.
+    */
+   if (pass->has_msrtss)
       return render_mode::GMEM;
 
    /* SYSMEM is always a safe default mode when we can't fully engage the autotuner. From testing, we know that for an
@@ -1953,22 +1974,22 @@ tu_autotune::write_preempt_counters_to_iova(struct tu_cs *cs,
                                             uint64_t aon_iova) const
 {
    if (emit_selector) {
-      tu_cs_emit_pkt4(cs, preemption_latency_selector_reg, 1);
-      tu_cs_emit(cs, preemption_latency_selector);
+      tu_cs_emit_pkt4(cs, preemption_latency_counter->select_reg, 1);
+      tu_cs_emit(cs, preemption_latency_countable->selector);
 
-      tu_cs_emit_pkt4(cs, always_count_selector_reg, 1);
-      tu_cs_emit(cs, always_count_selector);
+      tu_cs_emit_pkt4(cs, always_count_counter->select_reg, 1);
+      tu_cs_emit(cs, always_count_countable->selector);
    }
 
    if (emit_wfi)
       tu_cs_emit_wfi(cs);
 
    tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
-   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(preemption_latency_counter_reg_lo) | CP_REG_TO_MEM_0_64B);
+   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(preemption_latency_counter->counter_reg_lo) | CP_REG_TO_MEM_0_64B);
    tu_cs_emit_qw(cs, latency_iova);
 
    tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
-   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(always_count_counter_reg_lo) | CP_REG_TO_MEM_0_64B);
+   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(always_count_counter->counter_reg_lo) | CP_REG_TO_MEM_0_64B);
    tu_cs_emit_qw(cs, always_count_iova);
 
    tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
@@ -1980,8 +2001,7 @@ tu_autotune::write_preempt_counters_to_iova(struct tu_cs *cs,
 /** RP-level CS emissions **/
 
 void
-tu_autotune::begin_renderpass(
-   struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx, bool sysmem, uint32_t tile_count)
+tu_autotune::init_renderpass(rp_ctx_t rp_ctx, bool sysmem, uint32_t tile_count)
 {
    if (!rp_ctx)
       return;
@@ -1990,7 +2010,37 @@ tu_autotune::begin_renderpass(
    assert(!sysmem || tile_count == 0);
 
    rp_ctx->allocate(sysmem, tile_count);
+}
+
+void
+tu_autotune::begin_renderpass(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx)
+{
+   if (!rp_ctx)
+      return;
+
    rp_ctx->emit_rp_start(cmd, cs);
+}
+
+void
+tu_autotune::begin_binning(struct tu_cs *cs, rp_ctx_t rp_ctx)
+{
+   if (!rp_ctx)
+      return;
+
+   assert(!rp_ctx->sysmem);
+
+   rp_ctx->emit_binning_start(cs);
+}
+
+void
+tu_autotune::end_binning(struct tu_cs *cs, rp_ctx_t rp_ctx)
+{
+   if (!rp_ctx)
+      return;
+
+   assert(!rp_ctx->sysmem);
+
+   rp_ctx->emit_binning_end(cs);
 }
 
 void
@@ -2061,11 +2111,11 @@ tu_autotune::emit_switch_away_amble(struct tu_cs *cs) const
 
    static size_t counter = 0;
    if (counter++ % 2 == 0) {
-      tu_cs_emit_pkt4(cs, preemption_latency_selector_reg, 1);
-      tu_cs_emit(cs, preemption_latency_selector);
+      tu_cs_emit_pkt4(cs, preemption_latency_counter->select_reg, 1);
+      tu_cs_emit(cs, preemption_latency_countable->selector);
 
-      tu_cs_emit_pkt4(cs, always_count_selector_reg, 1);
-      tu_cs_emit(cs, always_count_selector);
+      tu_cs_emit_pkt4(cs, always_count_counter->select_reg, 1);
+      tu_cs_emit(cs, always_count_countable->selector);
    }
 
    tu_cond_exec_end(cs);

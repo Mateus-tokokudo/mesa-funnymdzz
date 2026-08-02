@@ -2006,7 +2006,7 @@ ntt_emit_mem(struct ntt_compile *c, nir_intrinsic_instr *instr,
       next_src = 1;
       break;
    case nir_var_mem_shared:
-      memory = ureg_src_register(TGSI_FILE_MEMORY, 0);
+      memory = ureg_src_register(TGSI_FILE_MEMORY, TGSI_MEMORY_TYPE_SHARED);
       next_src = 0;
       break;
    case nir_var_uniform: { /* HW atomic buffers */
@@ -3206,7 +3206,7 @@ ntt_emit_impl(struct ntt_compile *c, nir_function_impl *impl)
 
 }
 
-static int
+static unsigned
 type_size(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_attribute_slots(type, false);

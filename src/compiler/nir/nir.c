@@ -571,23 +571,14 @@ nir_find_sampler_variable_with_tex_index(nir_shader *shader,
    return NULL;
 }
 
-/* Annoyingly, qsort_r is not in the C standard library and, in particular, we
- * can't count on it on MSV and Android.  So we stuff the CMP function into
- * each array element.  It's a bit messy and burns more memory but the list of
- * variables should hever be all that long.
- */
-struct var_cmp {
-   nir_variable *var;
-   int (*cmp)(const nir_variable *, const nir_variable *);
-};
-
 static int
 var_sort_cmp(const void *_a, const void *_b, void *_cmp)
 {
-   const struct var_cmp *a = _a;
-   const struct var_cmp *b = _b;
-   assert(a->cmp == b->cmp);
-   return a->cmp(a->var, b->var);
+   const nir_variable *const *a = _a;
+   const nir_variable *const *b = _b;
+   int (*cmp)(const nir_variable *, const nir_variable *) = _cmp;
+
+   return cmp(*a, *b);
 }
 
 void
@@ -600,21 +591,18 @@ nir_sort_variables_with_modes(nir_shader *shader,
    nir_foreach_variable_with_modes(var, shader, modes) {
       ++num_vars;
    }
-   struct var_cmp *vars = ralloc_array(shader, struct var_cmp, num_vars);
+   nir_variable **vars = ralloc_array(shader, nir_variable *, num_vars);
    unsigned i = 0;
    nir_foreach_variable_with_modes_safe(var, shader, modes) {
       exec_node_remove(&var->node);
-      vars[i++] = (struct var_cmp){
-         .var = var,
-         .cmp = cmp,
-      };
+      vars[i++] = var;
    }
    assert(i == num_vars);
 
    util_qsort_r(vars, num_vars, sizeof(*vars), var_sort_cmp, cmp);
 
    for (i = 0; i < num_vars; i++)
-      exec_list_push_tail(&shader->variables, &vars[i].var->node);
+      exec_list_push_tail(&shader->variables, &vars[i]->node);
 
    ralloc_free(vars);
 }
@@ -707,8 +695,8 @@ nir_function_impl_create_bare(nir_shader *shader)
    impl->dom_lca_info.block_from_idx = NULL;
 
    /* create start & end blocks */
-   nir_block *start_block = nir_block_create(shader);
-   nir_block *end_block = nir_block_create(shader);
+   nir_block *start_block = nir_block_create(impl);
+   nir_block *end_block = nir_block_create(impl);
    start_block->cf_node.parent = &impl->cf_node;
    end_block->cf_node.parent = &impl->cf_node;
    impl->end_block = end_block;
@@ -738,9 +726,9 @@ nir_block_destructor(void *block_)
 }
 
 nir_block *
-nir_block_create(nir_shader *shader)
+nir_block_create(nir_function_impl *impl)
 {
-   nir_block *block = rzalloc(shader, nir_block);
+   nir_block *block = rzalloc(impl, nir_block);
 
    cf_init(&block->cf_node, nir_cf_node_block);
 
@@ -754,6 +742,7 @@ nir_block_create(nir_shader *shader)
 
    ralloc_set_destructor(block, &nir_block_destructor);
 
+   block->impl = impl;
    return block;
 }
 
@@ -764,21 +753,21 @@ src_init(nir_src *src)
 }
 
 nir_if *
-nir_if_create(nir_shader *shader)
+nir_if_create(nir_function_impl *impl)
 {
-   nir_if *if_stmt = ralloc(shader, nir_if);
+   nir_if *if_stmt = ralloc(impl, nir_if);
 
    if_stmt->control = nir_selection_control_none;
 
    cf_init(&if_stmt->cf_node, nir_cf_node_if);
    src_init(&if_stmt->condition);
 
-   nir_block *then = nir_block_create(shader);
+   nir_block *then = nir_block_create(impl);
    exec_list_make_empty(&if_stmt->then_list);
    exec_list_push_tail(&if_stmt->then_list, &then->cf_node.node);
    then->cf_node.parent = &if_stmt->cf_node;
 
-   nir_block *else_stmt = nir_block_create(shader);
+   nir_block *else_stmt = nir_block_create(impl);
    exec_list_make_empty(&if_stmt->else_list);
    exec_list_push_tail(&if_stmt->else_list, &else_stmt->cf_node.node);
    else_stmt->cf_node.parent = &if_stmt->cf_node;
@@ -787,16 +776,16 @@ nir_if_create(nir_shader *shader)
 }
 
 nir_loop *
-nir_loop_create(nir_shader *shader)
+nir_loop_create(nir_function_impl *impl)
 {
-   nir_loop *loop = rzalloc(shader, nir_loop);
+   nir_loop *loop = rzalloc(impl, nir_loop);
 
    cf_init(&loop->cf_node, nir_cf_node_loop);
    /* Assume that loops are divergent until proven otherwise */
    loop->divergent_break = true;
    loop->divergent_continue = true;
 
-   nir_block *body = nir_block_create(shader);
+   nir_block *body = nir_block_create(impl);
    exec_list_make_empty(&loop->body);
    exec_list_push_tail(&loop->body, &body->cf_node.node);
    body->cf_node.parent = &loop->cf_node;
@@ -940,6 +929,10 @@ nir_cmat_call_op_params(nir_cmat_call_op op, nir_function *callee)
       return 3;
    case nir_cmat_call_op_reduce_2x2:
       return 5;
+   case nir_cmat_call_op_tensor_load:
+      return 5;
+   case nir_cmat_call_op_tensor_store:
+      return 4;
    }
    UNREACHABLE("Invalid cmat call op");
 }
@@ -1167,11 +1160,21 @@ nir_alu_binop_identity(nir_op binop, unsigned bit_size)
 nir_function_impl *
 nir_cf_node_get_function(nir_cf_node *node)
 {
-   while (node->type != nir_cf_node_function) {
-      node = node->parent;
+   switch (node->type) {
+   case nir_cf_node_block:
+      return nir_cf_node_as_block(node)->impl;
+   case nir_cf_node_function:
+      return nir_cf_node_as_function(node);
+   case nir_cf_node_if: {
+      nir_if *if_stmt = nir_cf_node_as_if(node);
+      return nir_if_first_then_block(if_stmt)->impl;
    }
-
-   return nir_cf_node_as_function(node);
+   case nir_cf_node_loop: {
+      nir_loop *loop_stmt = nir_cf_node_as_loop(node);
+      return nir_loop_first_block(loop_stmt)->impl;
+   }
+   }
+   UNREACHABLE("Invalid node type");
 }
 
 /* Reduces a cursor by trying to convert everything to after and trying to
@@ -1245,8 +1248,7 @@ add_ssa_def_cb(nir_def *def, void *state)
    nir_instr *instr = state;
 
    if (instr->block && def->index == UINT_MAX) {
-      nir_function_impl *impl =
-         nir_cf_node_get_function(&instr->block->cf_node);
+      nir_function_impl *impl = instr->block->impl;
 
       def->index = impl->ssa_alloc++;
 
@@ -1310,7 +1312,7 @@ nir_instr_insert(nir_cursor cursor, nir_instr *instr)
    if (instr->type == nir_instr_type_jump)
       nir_handle_add_jump(instr->block);
 
-   nir_function_impl *impl = nir_cf_node_get_function(&instr->block->cf_node);
+   nir_function_impl *impl = instr->block->impl;
    impl->valid_metadata &= ~nir_metadata_instr_index;
 }
 
@@ -1727,8 +1729,7 @@ nir_def_init(nir_instr *instr, nir_def *def,
    def->loop_invariant = false;
 
    if (instr->block) {
-      nir_function_impl *impl =
-         nir_cf_node_get_function(&instr->block->cf_node);
+      nir_function_impl *impl = instr->block->impl;
 
       def->index = impl->ssa_alloc++;
 
@@ -1958,7 +1959,7 @@ nir_block_cf_tree_next(nir_block *block)
       return NULL;
    }
 
-   assert(nir_cf_node_get_function(&block->cf_node)->structured);
+   assert(block->impl->structured);
 
    nir_cf_node *cf_next = nir_cf_node_next(&block->cf_node);
    if (cf_next)
@@ -2001,7 +2002,7 @@ nir_block_cf_tree_prev(nir_block *block)
       return NULL;
    }
 
-   assert(nir_cf_node_get_function(&block->cf_node)->structured);
+   assert(block->impl->structured);
 
    nir_cf_node *cf_prev = nir_cf_node_prev(&block->cf_node);
    if (cf_prev)
@@ -3287,9 +3288,8 @@ nir_ssa_alu_instr_src_components(const nir_alu_instr *instr, unsigned src)
 
 #define CASE_ALL_SIZES(op) \
    case op:                \
-   case op##8:             \
-   case op##16:            \
-   case op##32:
+   case op##32:            \
+   case op##_pan:
 
 bool
 nir_alu_instr_is_comparison(const nir_alu_instr *instr)
@@ -3311,8 +3311,8 @@ nir_alu_instr_is_comparison(const nir_alu_instr *instr)
       CASE_ALL_SIZES(nir_op_uge)
       CASE_ALL_SIZES(nir_op_ieq)
       CASE_ALL_SIZES(nir_op_ine)
-      CASE_ALL_SIZES(nir_op_bitz)
-      CASE_ALL_SIZES(nir_op_bitnz)
+   case nir_op_bitz:
+   case nir_op_bitnz:
    case nir_op_inot:
       return true;
    default:
@@ -3751,6 +3751,81 @@ nir_instr_xfb_write_mask(nir_intrinsic_instr *instr)
    }
 
    return mask;
+}
+
+/**
+ * Returns 0 for varying slots that don't have a statically-known component
+ * count.
+ */
+unsigned
+nir_slot_num_components(gl_varying_slot slot, mesa_shader_stage stage) {
+   switch (slot) {
+   case VARYING_SLOT_POS:
+   case VARYING_SLOT_COL0:
+   case VARYING_SLOT_COL1:
+   case VARYING_SLOT_TEX0:
+   case VARYING_SLOT_TEX1:
+   case VARYING_SLOT_TEX2:
+   case VARYING_SLOT_TEX3:
+   case VARYING_SLOT_TEX4:
+   case VARYING_SLOT_TEX5:
+   case VARYING_SLOT_TEX6:
+   case VARYING_SLOT_TEX7:
+   case VARYING_SLOT_BFC0:
+   case VARYING_SLOT_BFC1:
+   case VARYING_SLOT_CLIP_VERTEX:
+   case VARYING_SLOT_CULL_DIST0:
+   case VARYING_SLOT_CULL_DIST1:
+   case VARYING_SLOT_CLIP_DIST0:
+   case VARYING_SLOT_CLIP_DIST1:
+      return 4;
+   case VARYING_SLOT_PSIZ:
+   case VARYING_SLOT_FOGC:
+   case VARYING_SLOT_EDGE:
+   case VARYING_SLOT_PRIMITIVE_ID:
+   case VARYING_SLOT_LAYER:
+   case VARYING_SLOT_VIEWPORT:
+   case VARYING_SLOT_VIEWPORT_MASK:
+   case VARYING_SLOT_FACE: /* or VARYING_SLOT_PRIMITIVE_SHADING_RATE */
+   case VARYING_SLOT_VIEW_INDEX:
+      return 1;
+   case VARYING_SLOT_TESS_LEVEL_OUTER:
+      if (stage == MESA_SHADER_MESH)
+         return 1; /* VARYING_SLOT_PRIMITIVE_COUNT */
+      assert(stage == MESA_SHADER_TESS_CTRL);
+      return 4;
+   case VARYING_SLOT_TESS_LEVEL_INNER:
+      if (stage == MESA_SHADER_MESH)
+         /* This is VARYING_SLOT_PRIMITIVE_INDICES, whose component count
+          * is different between NV_mesh_shader (where it is always 1) and
+          * EXT_mesh_shader (where it depends on the primitive topology). */
+         return 0;
+      assert(stage == MESA_SHADER_TESS_CTRL);
+      return 2;
+   case VARYING_SLOT_BOUNDING_BOX0:
+      if (stage == MESA_SHADER_TASK)
+         return 1; /* VARYING_SLOT_TASK_COUNT */
+      else if (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_TESS_EVAL ||
+               stage == MESA_SHADER_GEOMETRY)
+         return 1; /* VARYING_SLOT_GS_HEADER_IR3 */
+      else if (stage == MESA_SHADER_FRAGMENT)
+         return 2; /* VARYING_SLOT_PARAM_GEN_AMD */
+      assert(stage == MESA_SHADER_TESS_CTRL);
+      return 4;
+   case VARYING_SLOT_BOUNDING_BOX1:
+      if (stage == MESA_SHADER_MESH)
+         return 1; /* VARYING_SLOT_CULL_PRIMITIVE */
+      else if (stage == MESA_SHADER_GEOMETRY)
+         return 1; /* VARYING_SLOT_GS_VERTEX_FLAGS_IR3 */
+      assert(stage == MESA_SHADER_TESS_CTRL);
+      return 4;
+   case VARYING_SLOT_PNTC:
+      return 2;
+   default:
+      /* All builtin varying slots should have been covered */
+      assert(slot >= VARYING_SLOT_VAR0);
+      return 0;
+   }
 }
 
 /**

@@ -369,6 +369,10 @@ kbase_dev_query_props(struct kbase_kmod_dev *kbase_dev,
       PAN_KMOD_GROUP_ALLOW_PRIORITY_MEDIUM |
       PAN_KMOD_GROUP_ALLOW_PRIORITY_LOW;
 
+   /* kbase's SAME_VA/EXEC_VA allocations are exposed at the base 4 KiB
+    * granularity.  Newer pan_kmod derives the VM bitmap from device props. */
+   props->pgsize_bitmap = PAN_PGSIZE_4K;
+
    /* Supported BO flags. WB_MMAP is backed by BASE_MEM_CACHED_CPU and explicit
     * KBASE_IOCTL_MEM_SYNC operations in kbase_kmod_flush_bo_map_syncs().
     */
@@ -1833,8 +1837,7 @@ kbase_kmod_vm_create(struct pan_kmod_dev *dev, uint32_t flags,
       return NULL;
    }
 
-   pan_kmod_vm_init(&kbase_vm->base, dev, 0 /* no kernel handle */,
-                    flags, PAN_PGSIZE_4K);
+   pan_kmod_vm_init(&kbase_vm->base, dev, 0 /* no kernel handle */, flags);
    return &kbase_vm->base;
 }
 

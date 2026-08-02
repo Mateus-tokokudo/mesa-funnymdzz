@@ -26,20 +26,22 @@ build_precompiled_shaders(struct kk_device *dev)
       const struct kk_precompiled_info *info = (void *)bin;
       const char *msl = (const char *)bin + sizeof(*info);
 
-      mtl_library *library = mtl_new_library(dev->mtl_handle, msl);
+      mtl_library *library =
+         mtl_new_library(dev->mtl_compiler_handle, msl, MTL_MATH_MODE_FAST,
+                         MTL_MATH_FLOATING_POINT_FUNCTIONS_FAST);
       if (library == NULL)
          goto fail;
 
       struct kk_precompiled_shader *shader = &dev->precompiled_cache.shaders[i];
 
       /* TODO_KOSMICKRISP Do not hardcode the entrypoint */
-      mtl_function *function =
-         mtl_new_function_with_name(library, "main_entrypoint");
+      mtl_function_descriptor *function =
+         mtl_new_library_function_descriptor(library, "main_entrypoint");
       uint32_t local_size_threads = info->workgroup_size[0] *
                                     info->workgroup_size[1] *
                                     info->workgroup_size[2];
       shader->pipeline = mtl_new_compute_pipeline_state(
-         dev->mtl_handle, function, local_size_threads);
+         dev->mtl_compiler_handle, function, local_size_threads);
       mtl_release(function);
       mtl_release(library);
 

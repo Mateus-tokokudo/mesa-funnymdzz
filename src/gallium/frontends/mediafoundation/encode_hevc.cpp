@@ -357,12 +357,17 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext,
          pPicInfo->ref_list0[i] = cur_frame_desc->l0_reference_list[i];
    }
 
+   if( !m_EncoderCapabilities.m_bHWSupportsAppControlledSlicePartitioning && m_EncoderCapabilities.m_bHWSupportSliceModeAuto )
+   {
+      pPicInfo->slice_mode = PIPE_VIDEO_SLICE_MODE_AUTO;
+   }
+
    if( m_uiDirtyRectEnabled )
    {
       if( dirtyRectFrameNumSet )
       {
          DIRTYRECT_INFO *pDirtyRectInfo = (DIRTYRECT_INFO *) m_pDirtyRectBlob.data();
-         UINT uiNumDirtyRects = min( pDirtyRectInfo->NumDirtyRects, (UINT) PIPE_ENC_DIRTY_RECTS_NUM_MAX );
+         UINT uiNumDirtyRects = std::min( pDirtyRectInfo->NumDirtyRects, (UINT) PIPE_ENC_DIRTY_RECTS_NUM_MAX );
 
          if( uiNumDirtyRects > 0 )
          {
@@ -759,7 +764,7 @@ CDX12EncHMFT::GetCodecPrivateData( LPBYTE pSPSPPSData, DWORD dwSPSPPSDataLen, LP
    unsigned buf_size = dwSPSPPSDataLen;
    const uint32_t intra_period = m_uiGopSize;
    const uint32_t ip_period = m_uiBFrameCount + 1;
-   const uint8_t log2_max_pic_order_cnt_lsb_minus4 = 4;
+   const uint8_t log2_max_pic_order_cnt_lsb_minus4 = HEVC_LOG2_MAX_PIC_ORDER_CNT_LSB_MINUS4;
 
    pipe_h265_enc_picture_desc h265_pic_desc = {};
 

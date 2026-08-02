@@ -259,12 +259,18 @@ jay_collect_vectors(jay_builder *b, jay_def *vecs, uint32_t nr)
    uint32_t nr_indices = 0;
 
    for (unsigned i = 0; i < nr; ++i) {
-      assert(vecs[i].file == vecs[0].file && jay_is_ssa(vecs[i]));
       assert(!vecs[i].negate && !vecs[i].abs);
-
-      jay_foreach_comp(vecs[i], c) {
+      if (jay_is_null(vecs[i])) {
+         assert(i != 0);
          assert(nr_indices < ARRAY_SIZE(indices));
-         indices[nr_indices++] = jay_channel(vecs[i], c);
+         indices[nr_indices++] = 0;
+      } else {
+         assert(vecs[i].file == vecs[0].file && jay_is_ssa(vecs[i]));
+
+         jay_foreach_comp(vecs[i], c) {
+            assert(nr_indices < ARRAY_SIZE(indices));
+            indices[nr_indices++] = jay_channel(vecs[i], c);
+         }
       }
    }
 
@@ -386,7 +392,7 @@ static inline jay_inst *
 jay_set_conditional_mod(jay_builder *b,
                         jay_inst *I,
                         jay_def cond_flag,
-                        enum jay_conditional_mod cmod)
+                        gen_condition cmod)
 {
    I->conditional_mod = cmod;
    return jay_set_cond_flag(b, I, cond_flag);
@@ -424,7 +430,7 @@ JAY_BUILD_SRC(uint32_t x)
 static inline jay_inst *
 _jay_CMP(jay_builder *b,
          enum jay_type src_type,
-         enum jay_conditional_mod cmod,
+         gen_condition cmod,
          jay_def dst,
          jay_def src0,
          jay_def src1)
@@ -433,6 +439,7 @@ _jay_CMP(jay_builder *b,
    I->type = src_type;
    I->src[0] = src0;
    I->src[1] = src1;
+   I->uniform = jay_is_uniform(dst);
 
    /* Even if we want to write a 32-bit 0/~0 result, we still need to
     * register-allocate a flag, since the hardware will implicitly clobber one
@@ -452,7 +459,7 @@ _jay_CMP(jay_builder *b,
    _jay_CMP(b, st, cmod, dst, JAY_BUILD_SRC(src0), JAY_BUILD_SRC(src1))
 
 struct jayb_send_params {
-   enum brw_sfid sfid;
+   enum gen_sfid sfid;
    uint64_t msg_desc;
    jay_def dst;
    jay_def header;
@@ -468,6 +475,7 @@ struct jayb_send_params {
    bool uniform;
    bool bindless;
    bool pure;
+   bool skip_helpers;
 };
 
 static inline jay_inst *
@@ -480,6 +488,7 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
 
    I->dst = p.dst;
    I->type = p.type;
+   I->uniform = p.uniform;
 
    assert(I->type);
    info->type_0 = p.src_type[0] ? p.src_type[0] : I->type;
@@ -579,10 +588,11 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
    info->sfid = p.sfid;
    info->eot = p.eot;
    info->check_tdr = p.check_tdr;
-   info->uniform = p.uniform;
    info->bindless = p.bindless;
    info->pure = p.pure;
+   info->skip_helpers = p.skip_helpers;
    info->ex_desc_imm = p.ex_desc_imm;
+   info->mlen = lens[1];
    info->ex_mlen = lens[2];
    I->src[0] = jay_imm(((uint32_t) p.msg_desc) |
                        brw_message_desc(devinfo, lens[1], lens[0], has_header));
@@ -608,7 +618,10 @@ _jay_SEND(jay_builder *b, const struct jayb_send_params p)
       }
    }
 
-   assert(!info->uniform || jay_is_null(I->dst) || I->dst.file == UGPR);
+   if (p.uniform && b->shader->helpers_tracked) {
+      I->cond_flag = jay_alloc_def(b, FLAG, 1);
+   }
+
    jay_builder_insert(b, I);
    return I;
 }

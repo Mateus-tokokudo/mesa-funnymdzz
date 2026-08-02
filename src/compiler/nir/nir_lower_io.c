@@ -35,7 +35,7 @@
 struct lower_io_state {
    void *dead_ctx;
    nir_builder builder;
-   int (*type_size)(const struct glsl_type *type, bool);
+   unsigned (*type_size)(const struct glsl_type *type, bool);
    nir_variable_mode modes;
    nir_lower_io_options options;
    struct set variable_names;
@@ -168,8 +168,24 @@ nir_set_io_offset(nir_intrinsic_instr *intr, nir_io_offset offset)
    }
 
    if (nir_intrinsic_has_offset_shift(intr)) {
-      /* TODO add support for adjusting the base index. */
-      assert(!nir_intrinsic_has_base(intr) || nir_intrinsic_base(intr) == 0);
+      if (nir_intrinsic_has_base(intr)) {
+         unsigned cur_shift = nir_intrinsic_offset_shift(intr);
+         int cur_base = nir_intrinsic_base(intr);
+         int base;
+
+         if (cur_shift > offset.shift) {
+            base = cur_base << (cur_shift - offset.shift);
+         } else {
+            unsigned base_shift = offset.shift - cur_shift;
+
+            assert(util_is_aligned(cur_base, 1ull << base_shift));
+            assert(cur_base >= 0);
+
+            base = cur_base >> base_shift;
+         }
+
+         nir_intrinsic_set_base(intr, base);
+      }
 
       nir_intrinsic_set_offset_shift(intr, offset.shift);
    } else {
@@ -224,7 +240,7 @@ get_number_of_slots(struct lower_io_state *state,
 static nir_def *
 get_io_offset(nir_builder *b, nir_deref_instr *deref,
               nir_def **array_index,
-              int (*type_size)(const struct glsl_type *, bool),
+              unsigned (*type_size)(const struct glsl_type *, bool),
               unsigned *component, bool bts)
 {
    nir_deref_path path;
@@ -915,7 +931,7 @@ nir_lower_io_block(nir_block *block,
 static bool
 nir_lower_io_impl(nir_function_impl *impl,
                   nir_variable_mode modes,
-                  int (*type_size)(const struct glsl_type *, bool),
+                  unsigned (*type_size)(const struct glsl_type *, bool),
                   nir_lower_io_options options)
 {
    struct lower_io_state state;
@@ -956,7 +972,7 @@ nir_lower_io_impl(nir_function_impl *impl,
  */
 bool
 nir_lower_io(nir_shader *shader, nir_variable_mode modes,
-             int (*type_size)(const struct glsl_type *, bool),
+             unsigned (*type_size)(const struct glsl_type *, bool),
              nir_lower_io_options options)
 {
    bool progress = false;
@@ -967,6 +983,12 @@ nir_lower_io(nir_shader *shader, nir_variable_mode modes,
 
    return progress;
 }
+
+#define IMG_CASE(name)                          \
+   case nir_intrinsic_image_##name:             \
+   case nir_intrinsic_image_deref_##name:       \
+   case nir_intrinsic_bindless_image_##name:    \
+   case nir_intrinsic_image_heap_##name
 
 /**
  * Return the offset source number for a load/store intrinsic or -1 if there's no offset.
@@ -981,12 +1003,14 @@ nir_get_io_offset_src_number(const nir_intrinsic_instr *instr)
    case nir_intrinsic_load_pixel_local:
    case nir_intrinsic_load_shared:
    case nir_intrinsic_load_shared_nv:
+   case nir_intrinsic_load_shared_lock_nv:
    case nir_intrinsic_load_task_payload:
    case nir_intrinsic_load_uniform:
    case nir_intrinsic_load_constant:
    case nir_intrinsic_load_push_constant:
    case nir_intrinsic_load_kernel_input:
    case nir_intrinsic_load_global:
+   case nir_intrinsic_load_global_intel:
    case nir_intrinsic_load_global_2x32:
    case nir_intrinsic_load_global_constant:
    case nir_intrinsic_load_global_etna:
@@ -1036,13 +1060,15 @@ nir_get_io_offset_src_number(const nir_intrinsic_instr *instr)
    case nir_intrinsic_load_global_bounded:
    case nir_intrinsic_load_global_constant_offset:
    case nir_intrinsic_load_global_constant_bounded:
-   case nir_intrinsic_load_global_ir3:
+   case nir_intrinsic_load_global_offset:
    case nir_intrinsic_store_output:
    case nir_intrinsic_store_pixel_local:
    case nir_intrinsic_store_shared:
    case nir_intrinsic_store_shared_nv:
+   case nir_intrinsic_store_shared_unlock_nv:
    case nir_intrinsic_store_task_payload:
    case nir_intrinsic_store_global:
+   case nir_intrinsic_store_global_intel:
    case nir_intrinsic_store_global_2x32:
    case nir_intrinsic_store_global_etna:
    case nir_intrinsic_store_global_nv:
@@ -1064,18 +1090,26 @@ nir_get_io_offset_src_number(const nir_intrinsic_instr *instr)
    case nir_intrinsic_store_shared2_amd:
    case nir_intrinsic_store_shared_ir3:
    case nir_intrinsic_load_ssbo_intel:
+   IMG_CASE(load):
+   IMG_CASE(store):
+   IMG_CASE(sparse_load):
+   IMG_CASE(atomic):
+   IMG_CASE(atomic_swap):
+   IMG_CASE(texel_address):
+   IMG_CASE(samples_identical):
+   IMG_CASE(fragment_mask_load_amd):
       return 1;
    case nir_intrinsic_store_ssbo:
    case nir_intrinsic_store_per_vertex_output:
    case nir_intrinsic_store_per_view_output:
    case nir_intrinsic_store_per_primitive_output:
+   case nir_intrinsic_store_global_offset:
    case nir_intrinsic_load_attribute_pan:
    case nir_intrinsic_store_ssbo_block_intel:
    case nir_intrinsic_store_urb_vec4_intel:
    case nir_intrinsic_store_buffer_amd:
    case nir_intrinsic_store_ssbo_intel:
    case nir_intrinsic_store_global_amd:
-   case nir_intrinsic_store_global_ir3:
    case nir_intrinsic_global_atomic_amd:
       return 2;
    case nir_intrinsic_load_ssbo_ir3:
@@ -1104,12 +1138,6 @@ nir_get_io_offset_src(nir_intrinsic_instr *instr)
    const int idx = nir_get_io_offset_src_number(instr);
    return idx >= 0 ? &instr->src[idx] : NULL;
 }
-
-#define IMG_CASE(name)                          \
-   case nir_intrinsic_image_##name:             \
-   case nir_intrinsic_image_deref_##name:       \
-   case nir_intrinsic_bindless_image_##name:    \
-   case nir_intrinsic_image_heap_##name
 
 /**
  * Return the uniform offset source number for a load/store intrinsic or -1 if there's no offset.
@@ -1174,6 +1202,7 @@ nir_get_io_index_src_number(const nir_intrinsic_instr *instr)
    case nir_intrinsic_load_ssbo_uniform_block_intel:
    case nir_intrinsic_ssbo_atomic:
    case nir_intrinsic_ssbo_atomic_swap:
+   case nir_intrinsic_load_ssbo_address:
    IMG_CASE(load):
    IMG_CASE(store):
    IMG_CASE(sparse_load):
@@ -1224,10 +1253,10 @@ nir_get_io_data_src_number(const nir_intrinsic_instr *intr)
    case nir_intrinsic_store_shared_nv:
    case nir_intrinsic_store_task_payload:
    case nir_intrinsic_store_global:
+   case nir_intrinsic_store_global_intel:
    case nir_intrinsic_store_global_block_intel:
    case nir_intrinsic_store_global_amd:
    case nir_intrinsic_store_global_2x32:
-   case nir_intrinsic_store_global_ir3:
    case nir_intrinsic_store_global_etna:
    case nir_intrinsic_store_global_nv:
    case nir_intrinsic_store_scratch:
@@ -1364,7 +1393,7 @@ nir_get_io_arrayed_index_src(nir_intrinsic_instr *instr)
    return idx >= 0 ? &instr->src[idx] : NULL;
 }
 
-static int
+static unsigned
 type_size_vec4(const struct glsl_type *type, bool bindless)
 {
    return glsl_count_attribute_slots(type, false);
@@ -1443,7 +1472,7 @@ nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs)
    /* This must be called after folding constant offset srcs. */
    if (nir->info.stage != MESA_SHADER_MESH &&
        !(nir->options->support_indirect_inputs & BITFIELD_BIT(nir->info.stage)))
-      NIR_PASS(_, nir, nir_lower_io_indirect_loads, nir_var_shader_in);
+      NIR_PASS(_, nir, nir_lower_io_indirect_loads, nir_var_shader_in, false);
 
    /* Lower and remove dead derefs and variables to clean up the IR. */
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);

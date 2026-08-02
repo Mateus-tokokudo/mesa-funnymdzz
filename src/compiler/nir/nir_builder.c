@@ -425,9 +425,10 @@ nir_vec_scalars(nir_builder *build, nir_scalar *comp, unsigned num_components)
 }
 
 nir_def *
-nir_def_rewrite_uses_with_alu_src(nir_builder *build, nir_def *def,
-                                  nir_alu_src src, unsigned num_components)
+nir_def_rewrite_uses_with_alu_src(nir_builder *build, nir_def *def, nir_alu_src src)
 {
+   unsigned num_components = def->num_components;
+
    if (nir_alu_src_is_trivial_ssa(&src, num_components)) {
       nir_def_rewrite_uses(def, src.src.ssa);
       return NULL;
@@ -543,7 +544,7 @@ nir_builder_is_inside_cf(nir_builder *build, nir_cf_node *cf_node)
 nir_if *
 nir_push_if(nir_builder *build, nir_def *condition)
 {
-   nir_if *nif = nir_if_create(build->shader);
+   nir_if *nif = nir_if_create(build->impl);
    nif->condition = nir_src_for_ssa(condition);
    nir_builder_cf_insert(build, &nif->cf_node);
    build->cursor = nir_before_cf_list(&nif->then_list);
@@ -598,7 +599,7 @@ nir_if_phi(nir_builder *build, nir_def *then_def, nir_def *else_def)
 nir_loop *
 nir_push_loop(nir_builder *build)
 {
-   nir_loop *loop = nir_loop_create(build->shader);
+   nir_loop *loop = nir_loop_create(build->impl);
    nir_builder_cf_insert(build, &loop->cf_node);
    build->cursor = nir_before_cf_list(&loop->body);
    return loop;
@@ -677,45 +678,18 @@ nir_type_convert(nir_builder *b,
     */
    if (dst_base == nir_type_bool && src_base != nir_type_bool) {
       nir_op opcode;
-
       const unsigned dst_bit_size = nir_alu_type_get_type_size(dest_type);
 
+      /* For conversions to backend-specific bit-sizes,
+       * please use the appropriate instructions directly.
+       */
+      assert(dst_bit_size == 1);
+
       if (src_base == nir_type_float) {
-         switch (dst_bit_size) {
-         case 1:
-            opcode = nir_op_fneu;
-            break;
-         case 8:
-            opcode = nir_op_fneu8;
-            break;
-         case 16:
-            opcode = nir_op_fneu16;
-            break;
-         case 32:
-            opcode = nir_op_fneu32;
-            break;
-         default:
-            UNREACHABLE("Invalid Boolean size.");
-         }
+         opcode = nir_op_fneu;
       } else {
          assert(src_base == nir_type_int || src_base == nir_type_uint);
-
-         switch (dst_bit_size) {
-         case 1:
-            opcode = nir_op_ine;
-            break;
-         case 8:
-            opcode = nir_op_ine8;
-            break;
-         case 16:
-            opcode = nir_op_ine16;
-            break;
-         case 32:
-            opcode = nir_op_ine32;
-            break;
-         default:
-            UNREACHABLE("Invalid Boolean size.");
-         }
+         opcode = nir_op_ine;
       }
 
       return nir_build_alu(b, opcode, src,

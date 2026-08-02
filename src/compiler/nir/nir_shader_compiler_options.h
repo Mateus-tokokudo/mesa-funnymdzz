@@ -90,6 +90,16 @@ typedef enum {
     * convergent are divergent).
     */
    nir_divergence_across_subgroups = (1 << 12),
+
+   /* Whether local_invocation_id.z is considered uniform, to be set
+    * by the driver based on the subgroup size when the hardware's
+    * walk order guarantees that its Z component will be uniform
+    * across the desired set of invocations.
+    */
+   nir_divergence_uniform_local_invocation_id_z = (1 << 13),
+
+   /* Whether InvocationID in TCS is considered uniform */
+   nir_divergence_tcs_invocation_id_uniform = (1 << 14),
 } nir_divergence_options;
 
 /** An instruction filtering callback
@@ -725,6 +735,9 @@ typedef struct nir_shader_compiler_options {
 
    /** Backend supports load_global_bounded intrinsics. */
    bool has_load_global_bounded;
+
+   /** Backend supports load/store_global_offset*/
+   bool has_global_offset;
 
    /** Backend supports f2i32_rtne opcode. */
    bool has_f2i32_rtne;

@@ -374,7 +374,7 @@ draw_vbos(struct fd_context *ctx, const struct pipe_draw_info *info,
    }
    emit.fs = fd6_emit_get_prog(&emit)->fs;
 
-   if (emit.prog->num_driver_params || fd6_ctx->has_dp_state) {
+   if (emit.prog->needs_driver_params || fd6_ctx->has_dp_state) {
       emit.draw = &draws[0];
       emit.dirty_groups |= BIT(FD6_GROUP_DRIVER_PARAMS);
    }
@@ -430,12 +430,12 @@ draw_vbos(struct fd_context *ctx, const struct pipe_draw_info *info,
       /* maximum number of patches that can fit in tess factor/param buffers */
       uint32_t subdraw_size = MIN2(FD6_TESS<CHIP>::FACTOR_SIZE / factor_stride,
                                    FD6_TESS<CHIP>::PARAM_SIZE / (emit.hs->output_size * 4));
-      /* convert from # of patches to draw count */
-      subdraw_size *= ctx->patch_vertices;
-
       /* For gen8 tess_bo is sized for two draws, adjust subdraw size accordingly: */
       if (CHIP >= A8XX)
          subdraw_size /= 2;
+
+      /* convert from # of patches to draw count */
+      subdraw_size *= ctx->patch_vertices;
 
       fd_pkt7(cs, CP_SET_SUBDRAW_SIZE, 1)
          .add(subdraw_size);

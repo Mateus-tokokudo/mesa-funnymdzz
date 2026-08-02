@@ -1471,9 +1471,6 @@ iris_init_render_context(struct iris_batch *batch)
       INTEL_SAMPLE_POS_2X(pat._2xSample);
       INTEL_SAMPLE_POS_4X(pat._4xSample);
       INTEL_SAMPLE_POS_8X(pat._8xSample);
-#if GFX_VER >= 9
-      INTEL_SAMPLE_POS_16X(pat._16xSample);
-#endif
    }
 
    /* Use the legacy AA line coverage computation. */
@@ -1574,7 +1571,7 @@ iris_init_compute_context(struct iris_batch *batch)
 
    uint8_t pixel_async_compute_thread_limit, z_pass_async_compute_thread_limit,
            np_z_async_throttle_settings;
-   intel_compute_engine_async_threads_limit(devinfo, 0, false,
+   intel_compute_engine_async_threads_limit(devinfo, 0, false, false,
                                             &pixel_async_compute_thread_limit,
                                             &z_pass_async_compute_thread_limit,
                                             &np_z_async_throttle_settings);
@@ -1655,14 +1652,6 @@ struct iris_depth_buffer_state {
 #endif
 };
 
-#if INTEL_NEEDS_WA_1808121037
-enum iris_depth_reg_mode {
-   IRIS_DEPTH_REG_MODE_HW_DEFAULT = 0,
-   IRIS_DEPTH_REG_MODE_D16_1X_MSAA,
-   IRIS_DEPTH_REG_MODE_UNKNOWN,
-};
-#endif
-
 /**
  * Generation-specific context state (ice->state.genx->...).
  *
@@ -1683,10 +1672,6 @@ struct iris_genx_state {
 
    /* Is object level preemption enabled? */
    bool object_preemption;
-
-#if INTEL_NEEDS_WA_1808121037
-   enum iris_depth_reg_mode depth_reg_mode;
-#endif
 
    struct {
 #if GFX_VER == 8
@@ -2299,7 +2284,7 @@ get_line_width(const struct pipe_rasterizer_state *state)
    if (!state->multisample && !state->line_smooth)
       line_width = roundf(state->line_width);
 
-   if (!state->multisample && state->line_smooth && line_width < 1.5f) {
+   if (!state->multisample && line_width < 1.5f) {
       /* For 1 pixel line thickness or less, the general anti-aliasing
        * algorithm gives up, and a garbage line is generated.  Setting a
        * Line Width of 0.0 specifies the rasterization of the "thinnest"
@@ -3104,7 +3089,7 @@ iris_create_sampler_view(struct pipe_context *ctx,
         isv->res->aux.usage == ISL_AUX_USAGE_FCV_CCS_E) &&
        !isl_format_supports_ccs_e(devinfo, isv->view.format)) {
       aux_usages = 1 << ISL_AUX_USAGE_NONE;
-   } else if (isl_aux_usage_has_hiz(isv->res->aux.usage)) {
+   } else if (isl_surf_usage_is_depth(isv->res->surf.usage)) {
       aux_usages = 1 << iris_depth_texture_aux_usage(devinfo, isv->res);
       if (isv->res->aux.usage != ISL_AUX_USAGE_HIZ_CCS ||
           devinfo->verx10 < 125) {
@@ -3682,10 +3667,10 @@ iris_set_sample_mask(struct pipe_context *ctx, unsigned sample_mask)
 {
    struct iris_context *ice = (struct iris_context *) ctx;
 
-   /* We only support 16x MSAA, so we have 16 bits of sample maks.
+   /* We only support up to 8x MSAA, so we have 8 bits of sample mask.
     * st/mesa may pass us 0xffffffff though, meaning "enable all samples".
     */
-   ice->state.sample_mask = sample_mask & 0xffff;
+   ice->state.sample_mask = sample_mask & 0xff;
    ice->state.dirty |= IRIS_DIRTY_SAMPLE_MASK;
 }
 
@@ -3844,11 +3829,6 @@ iris_set_framebuffer_state(struct pipe_context *ctx,
    if (cso->samples != samples) {
       ice->state.dirty |= IRIS_DIRTY_MULTISAMPLE;
 
-      /* We need to toggle 3DSTATE_PS::32 Pixel Dispatch Enable */
-      if (GFX_VER >= 9 && GFX_VER < 30 &&
-          (cso->samples == 16 || samples == 16))
-         ice->state.stage_dirty |= IRIS_STAGE_DIRTY_FS;
-
       /* We may need to emit blend state for Wa_14018912822. */
       if ((cso->samples > 1) != (samples > 1) &&
           intel_needs_workaround(devinfo, 14018912822)) {
@@ -3942,12 +3922,12 @@ iris_set_framebuffer_state(struct pipe_context *ctx,
 
          view.format = zres->surf.format;
 
-         if (zres->aux.usage != ISL_AUX_USAGE_NONE) {
-            info.hiz_usage = zres->aux.usage;
+         if (isl_aux_usage_has_hiz(zres->aux.usage)) {
             info.hiz_surf = &zres->aux.surf;
             info.hiz_address = zres->aux.bo->address + zres->aux.offset;
          }
 
+         info.hiz_usage = zres->aux.usage;
          ice->state.hiz_usage = info.hiz_usage;
       }
 
@@ -5092,7 +5072,8 @@ iris_store_vs_state(const struct iris_screen *screen,
       vs.UserClipDistanceCullTestEnableBitmask =
          vue_data->cull_distance_mask;
 #if GFX_VER >= 30
-      vs.RegistersPerThread = ptl_register_blocks(shader->brw_prog_data->grf_used);
+      vs.RegistersPerThread =
+         brw_register_blocks(devinfo, shader->brw_prog_data->grf_used);
 #endif
    }
 }
@@ -5142,7 +5123,8 @@ iris_store_tcs_state(const struct iris_screen *screen,
 #endif
 
 #if GFX_VER >= 30
-      hs.RegistersPerThread = ptl_register_blocks(shader->brw_prog_data->grf_used);
+      hs.RegistersPerThread =
+         brw_register_blocks(devinfo, shader->brw_prog_data->grf_used);
 #endif
    }
 }
@@ -5176,7 +5158,8 @@ iris_store_tes_state(const struct iris_screen *screen,
          vue_data->cull_distance_mask;
 
 #if GFX_VER >= 30
-      ds.RegistersPerThread = ptl_register_blocks(shader->brw_prog_data->grf_used);
+      ds.RegistersPerThread =
+         brw_register_blocks(devinfo, shader->brw_prog_data->grf_used);
 #endif
    }
 
@@ -5259,7 +5242,8 @@ iris_store_gs_state(const struct iris_screen *screen,
       gs.VertexURBEntryOutputLength = MAX2(urb_entry_output_length, 1);
 
 #if GFX_VER >= 30
-      gs.RegistersPerThread = ptl_register_blocks(shader->brw_prog_data->grf_used);
+      gs.RegistersPerThread =
+         brw_register_blocks(devinfo, shader->brw_prog_data->grf_used);
 #endif
    }
 }
@@ -5291,7 +5275,8 @@ iris_store_fs_state(const struct iris_screen *screen,
 #endif
 
 #if GFX_VER >= 30
-      ps.RegistersPerThread = ptl_register_blocks(shader->brw_prog_data->grf_used);
+      ps.RegistersPerThread =
+         brw_register_blocks(devinfo, shader->brw_prog_data->grf_used);
 #endif
 
       /* From the documentation for this packet:
@@ -5390,8 +5375,9 @@ iris_store_cs_state(const struct iris_screen *screen,
       desc.ThreadPreemptionDisable = true;
 #endif
 #if GFX_VER >= 30
-      desc.RegistersPerThread = ptl_register_blocks(
-         shader->brw_prog_data->grf_used);
+      desc.RegistersPerThread =
+         brw_register_blocks(screen->devinfo,
+                             shader->brw_prog_data->grf_used);
 #endif
    }
 }
@@ -6553,49 +6539,13 @@ emit_push_constant_packet_all(struct iris_context *ice,
 #endif
 
 void
-genX(emit_depth_state_workarounds)(struct iris_context *ice,
-                                   struct iris_batch *batch,
-                                   const struct isl_surf *surf)
+genX(batch_disable_hiz_planes)(struct iris_batch *batch)
 {
-#if INTEL_NEEDS_WA_1808121037
-   const bool is_d16_1x_msaa = surf->format == ISL_FORMAT_R16_UNORM &&
-                               surf->samples == 1;
-
-   switch (ice->state.genx->depth_reg_mode) {
-   case IRIS_DEPTH_REG_MODE_HW_DEFAULT:
-      if (!is_d16_1x_msaa)
-         return;
-      break;
-   case IRIS_DEPTH_REG_MODE_D16_1X_MSAA:
-      if (is_d16_1x_msaa)
-         return;
-      break;
-   case IRIS_DEPTH_REG_MODE_UNKNOWN:
-      break;
-   }
-
-   /* We'll change some CHICKEN registers depending on the depth surface
-    * format. Do a depth flush and stall so the pipeline is not using these
-    * settings while we change the registers.
-    */
-   iris_emit_end_of_pipe_sync(batch,
-                              "Workaround: Stop pipeline for Wa_1808121037",
-                              PIPE_CONTROL_DEPTH_STALL |
-                              PIPE_CONTROL_DEPTH_CACHE_FLUSH);
-
-   /* Wa_1808121037
-    *
-    * To avoid sporadic corruptions “Set 0x7010[9] when Depth Buffer
-    * Surface Format is D16_UNORM , surface type is not NULL & 1X_MSAA”.
-    */
+#if GFX_VER == 12
    iris_emit_reg(batch, GENX(COMMON_SLICE_CHICKEN1), reg) {
-      reg.HIZPlaneOptimizationdisablebit = is_d16_1x_msaa;
+      reg.HIZPlaneOptimizationdisablebit = true;
       reg.HIZPlaneOptimizationdisablebitMask = true;
    }
-
-   ice->state.genx->depth_reg_mode =
-      is_d16_1x_msaa ? IRIS_DEPTH_REG_MODE_D16_1X_MSAA :
-                       IRIS_DEPTH_REG_MODE_HW_DEFAULT;
 #endif
 }
 
@@ -7355,8 +7305,8 @@ iris_upload_dirty_render_state(struct iris_context *ice,
           screen->driconf.intel_enable_wa_14024015672_msaa);
       if (batch->ice->state.rhwo_disabled != rhwo_disabled) {
          iris_emit_pipe_control_flush(batch, "RHWO state change",
-                                      PIPE_CONTROL_STALL_AT_SCOREBOARD |
-                                      PIPE_CONTROL_CS_STALL);
+                                      PIPE_CONTROL_RENDER_TARGET_FLUSH |
+                                      (GFX_VERx10 >= 125 ? 0 : PIPE_CONTROL_CS_STALL));
          batch->screen->vtbl.disable_rhwo_optimization(
             batch, rhwo_disabled);
       }
@@ -7998,8 +7948,35 @@ iris_upload_dirty_render_state(struct iris_context *ice,
                                       screen->workaround_address.offset, 0);
       }
 
-      if (zres)
-         genX(emit_depth_state_workarounds)(ice, batch, &zres->surf);
+      if (zres && INTEL_NEEDS_WA_1808121037 &&
+          zres->surf.samples == 1 &&
+          zres->surf.format == ISL_FORMAT_R16_UNORM) {
+         /* Disable HiZ planes on D16 1x MSAA to avoid sporadic corruption. */
+         genX(batch_disable_hiz_planes)(batch);
+      }
+   }
+
+   if ((stage_dirty & IRIS_STAGE_DIRTY_FS) ||
+       (dirty & IRIS_DIRTY_WM_DEPTH_STENCIL)) {
+      /* According to Bspec 72161 (r890) and HSD 22019411255, we can improve
+       * performance by avoiding HiZ planes for draw calls which compute depth
+       * and perform read-only depth tests. According to HSD 22019338931, this
+       * is fixed on gfx35.
+       */
+      const struct iris_fs_data *fs_data =
+         iris_fs_data(ice->shaders.prog[MESA_SHADER_FRAGMENT]);
+      if (GFX_VER >= 12 && GFX_VER <= 30 &&
+          ice->state.cso_zsa->depth_test_enabled &&
+          !ice->state.cso_zsa->depth_writes_enabled &&
+          fs_data && fs_data->computed_depth_mode != PSCDEPTH_OFF) {
+         /* For now, implement the simple fix only for gfx12. For platforms
+          * which can't use the simple fix, we'll need to temporarily switch
+          * to ISL_AUX_USAGE_ZCS.
+          */
+         perf_debug(&ice->dbg,
+                    "Disabling HiZ planes for RO depth test only on gfx12\n");
+         genX(batch_disable_hiz_planes)(batch);
+      }
    }
 
    if (dirty & (IRIS_DIRTY_DEPTH_BUFFER | IRIS_DIRTY_WM_DEPTH_STENCIL)) {
@@ -9108,6 +9085,7 @@ iris_upload_compute_walker(struct iris_context *ice,
 
    intel_compute_engine_async_threads_limit(devinfo, dispatch.threads,
                                             slm_or_barrier_enabled,
+                                            cs_data->uses_fence,
                                             &pixel_async_compute_thread_limit,
                                             &z_pass_async_compute_thread_limit,
                                             &np_z_async_throttle_settings);
@@ -9161,7 +9139,8 @@ iris_upload_compute_walker(struct iris_context *ice,
    idd.BindingTableEntryCount = MIN2(encode_surface_count(screen, shader), 31);
    idd.NumberOfBarriers = cs_data->uses_barrier;
 #if GFX_VER >= 30
-   idd.RegistersPerThread = ptl_register_blocks(shader->brw_prog_data->grf_used);
+   idd.RegistersPerThread =
+      brw_register_blocks(devinfo, shader->brw_prog_data->grf_used);
 #endif
 
 struct GENX(COMPUTE_WALKER_BODY) body = {
@@ -10458,10 +10437,6 @@ static void
 iris_lost_genx_state(struct iris_context *ice, struct iris_batch *batch)
 {
    struct iris_genx_state *genx = ice->state.genx;
-
-#if INTEL_NEEDS_WA_1808121037
-   genx->depth_reg_mode = IRIS_DEPTH_REG_MODE_UNKNOWN;
-#endif
 
    memset(genx->last_index_buffer, 0, sizeof(genx->last_index_buffer));
 }

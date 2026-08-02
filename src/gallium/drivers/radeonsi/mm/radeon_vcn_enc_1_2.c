@@ -203,8 +203,30 @@ unsigned int radeon_enc_write_sps(struct radeon_encoder *enc, uint8_t nal_byte, 
 unsigned int radeon_enc_write_sps_hevc(struct radeon_encoder *enc, uint8_t *out)
 {
    struct pipe_h265_enc_seq_param sps = enc->enc_pic.hevc.desc->seq;
-   sps.pic_width_in_luma_samples = enc->enc_pic.session_init.aligned_picture_width;
-   sps.pic_height_in_luma_samples = enc->enc_pic.session_init.aligned_picture_height;
+
+   int width_correction = enc->enc_pic.session_init.aligned_picture_width - sps.pic_width_in_luma_samples;
+   int height_correction = enc->enc_pic.session_init.aligned_picture_height - sps.pic_height_in_luma_samples;
+   sps.pic_width_in_luma_samples += width_correction;
+   sps.pic_height_in_luma_samples += height_correction;
+
+   if (width_correction != 0 ||
+       height_correction != 0) {
+      const int chroma_idc_div = 2;
+      int wcrop_correction = width_correction / chroma_idc_div;
+      int hcrop_correction = height_correction / chroma_idc_div;
+
+      if (sps.conformance_window_flag) {
+         sps.conf_win_right_offset += wcrop_correction;
+         sps.conf_win_bottom_offset += hcrop_correction;
+      } else {
+         sps.conformance_window_flag = 1;
+         sps.conf_win_left_offset = 0;
+         sps.conf_win_right_offset = wcrop_correction;
+         sps.conf_win_top_offset = 0;
+         sps.conf_win_bottom_offset = hcrop_correction;
+      }
+   }
+
    sps.log2_min_luma_coding_block_size_minus3 =
       enc->enc_pic.hevc_spec_misc.log2_min_luma_coding_block_size_minus3;
    sps.log2_diff_max_min_luma_coding_block_size = 6 - (sps.log2_min_luma_coding_block_size_minus3 + 3);

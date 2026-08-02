@@ -2,36 +2,40 @@ if devinfo.ver < 20 then
   error("SRND instruction requires Gfx20+")
 end
 
-local r = execute {
-  src = [[
-    @id      g1
+local exec_size = devinfo.ver >= 20 and 16 or 8
+local buf = alloc(exec_size)
 
-    // Prepare F32 input data in g2
-    mov(8)   g2<1>UD    0x00000000UD    {A@1};   // 0.0f
-    mov(8)   g2.1<1>UD  0x80000000UD    {A@1};   // -0.0f
-    mov(8)   g2.2<1>UD  0x7f7fffffUD    {A@1};   // FLT_MAX
-    mov(8)   g2.3<1>UD  0xff7fffffUD    {A@1};   // -FLT_MAX
-    mov(8)   g2.4<1>UD  0x00800000UD    {A@1};   // smallest normal
-    mov(8)   g2.5<1>UD  0x7fc00000UD    {A@1};   // NaN
-    mov(8)   g2.6<1>UD  0x7f800000UD    {A@1};   // +inf
-    mov(8)   g2.7<1>UD  0xff800000UD    {A@1};   // -inf
+execute [[
+    @param autoswsb
 
-    mov(8)   g3<2>UW   42UW                      {A@1};
+    @id      r2
+    @addr    r7        buf0 r2
 
-    // Stochastic rounding: F32 -> HF16 using g3 as random, packed
-    srnd(8)  g4<2>HF   g2<1,1,0>F   g3<1,1,0>F   {nomask};
+    // Prepare F32 input data in r3
+    mov (8) r3.0 0x00000000   // 0.0f
+    mov (8) r3.1 0x80000000   // -0.0f
+    mov (8) r3.2 0x7f7fffff   // FLT_MAX
+    mov (8) r3.3 0xff7fffff   // -FLT_MAX
+    mov (8) r3.4 0x00800000   // smallest normal
+    mov (8) r3.5 0x7fc00000   // NaN
+    mov (8) r3.6 0x7f800000   // +inf
+    mov (8) r3.7 0xff800000   // -inf
+
+    mov (8) r4<2>:uw 42:uw
+
+    // Stochastic rounding: F32 -> HF16 using r4 as random, packed
+    (W) srnd (8) r5<2>:hf r3:f r4:f
 
     // Convert back to F32 for checking, using supported regioning
-    mov(8)   g5<1>F    g4<2,1,0>HF               {A@1};
+    mov (8) r6:f r5<2>:hf
 
-    @write   g1        g5
+    @store   r7        r6
 
     @eot
-  ]],
-}
+]]
 
 print("result")
-dump(r, 8)
+dump(buf, 8)
 
 print("expected")
 expected = {
@@ -48,8 +52,8 @@ expected = {
 dump(expected, 8)
 
 for i=0,7 do
-  if r[i] ~= expected[i] then
-    print("FAIL at index", i, string.format("got 0x%08x expected 0x%08x", r[i], expected[i]))
+  if buf[i] ~= expected[i] then
+    print("FAIL at index", i, string.format("got 0x%08x expected 0x%08x", buf[i], expected[i]))
     return
   end
 end

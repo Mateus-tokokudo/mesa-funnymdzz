@@ -10,10 +10,13 @@
 #include "kk_buffer.h"
 #include "kk_cmd_pool.h"
 #include "kk_descriptor_set_layout.h"
-#include "kk_encoder.h"
 #include "kk_entrypoints.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
+#include "kosmickrisp/bridge/mtl_command_buffer.h"
+#include "kosmickrisp/bridge/mtl_device.h"
+#include "kosmickrisp/bridge/mtl_encoder.h"
+#include "kosmickrisp/bridge/vk_to_mtl_map.h"
 
 #include "vk_alloc.h"
 #include "vk_pipeline_layout.h"
@@ -30,7 +33,7 @@ kk_descriptor_state_fini(struct kk_cmd_buffer *cmd,
    }
 }
 
-void
+static void
 kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
 {
    struct kk_cmd_pool *pool = kk_cmd_buffer_pool(cmd);
@@ -41,11 +44,29 @@ kk_cmd_release_resources(struct kk_device *dev, struct kk_cmd_buffer *cmd)
 
    kk_cmd_pool_free_bo_list(pool, &cmd->uploader.bos);
 
+   /* Release all command buffers used */
+   util_dynarray_foreach(&cmd->submit_cmd_bufs, mtl_command_buffer *, cmd_buf) {
+      mtl_release(*cmd_buf);
+   }
+   util_dynarray_clear(&cmd->submit_cmd_bufs);
+
    /* Release all BOs used as descriptor buffers for submissions */
    util_dynarray_foreach(&cmd->large_bos, struct kk_bo *, bo) {
       kk_destroy_bo(dev, *bo);
    }
    util_dynarray_clear(&cmd->large_bos);
+}
+
+static void
+kk_destroy_encoder_state(struct kk_encoder_state *es)
+{
+   assert(es->encoder == NULL);
+   assert(es->cmd_buf == NULL);
+
+   mtl_release(es->allocator);
+   es->allocator = NULL;
+
+   util_dynarray_fini(&es->ts_resolves);
 }
 
 static void
@@ -55,13 +76,27 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
       container_of(vk_cmd_buffer, struct kk_cmd_buffer, vk);
    struct kk_cmd_pool *pool = kk_cmd_buffer_pool(cmd);
 
+   mtl_release(cmd->argument_table);
+   kk_destroy_encoder_state(&cmd->cmp[0]);
+   kk_destroy_encoder_state(&cmd->cmp[1]);
+   kk_destroy_encoder_state(&cmd->gfx);
+
    vk_command_buffer_finish(&cmd->vk);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    kk_cmd_release_resources(dev, cmd);
+   util_dynarray_fini(&cmd->submit_cmd_bufs);
    util_dynarray_fini(&cmd->large_bos);
 
    vk_free(&pool->vk.alloc, cmd);
+}
+
+static bool
+kk_init_encoder_state(struct kk_encoder_state *es, mtl_device *handle)
+{
+   es->allocator = mtl_new_command_allocator(handle);
+   es->ts_resolves = UTIL_DYNARRAY_INIT;
+   return es->allocator != NULL;
 }
 
 static VkResult
@@ -79,13 +114,37 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    if (cmd == NULL)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   result =
-      vk_command_buffer_init(&pool->vk, &cmd->vk, &kk_cmd_buffer_ops, level);
-   if (result != VK_SUCCESS) {
-      vk_free(&pool->vk.alloc, cmd);
-      return result;
+   result = vk_command_buffer_init_with_params(
+      &cmd->vk, &(struct vk_command_buffer_init_params){
+                   .pool = &pool->vk,
+                   .ops = &kk_cmd_buffer_ops,
+                   .level = level,
+                   .needs_cmd_queue = true,
+                });
+   if (result != VK_SUCCESS)
+      goto alloc_fail;
+
+   cmd->pre_gfx = &cmd->cmp[0];
+   cmd->post_gfx = &cmd->cmp[1];
+   if (!kk_init_encoder_state(cmd->pre_gfx, dev->mtl_handle))
+      goto pre_gfx_allocator_fail;
+
+   if (!kk_init_encoder_state(&cmd->gfx, dev->mtl_handle))
+      goto gfx_allocator_fail;
+
+   if (!kk_init_encoder_state(cmd->post_gfx, dev->mtl_handle))
+      goto post_gfx_allocator_fail;
+
+   {
+      mtl_argument_table_descriptor *desc = mtl_new_argument_table_descriptor();
+      /* Root at 0, samplers at 1 and per draw data at 2 */
+      mtl_set_max_buffer_binding_count(desc, 3u);
+      cmd->argument_table = mtl_new_argument_table(dev->mtl_handle, desc);
+      mtl_set_address(cmd->argument_table, dev->samplers.table.bo->gpu, 1u);
+      mtl_release(desc);
    }
 
+   cmd->submit_cmd_bufs = UTIL_DYNARRAY_INIT;
    cmd->large_bos = UTIL_DYNARRAY_INIT;
 
    cmd->vk.dynamic_graphics_state.vi = &cmd->state.gfx._dynamic_vi;
@@ -97,6 +156,45 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
    *cmd_buffer_out = &cmd->vk;
 
    return VK_SUCCESS;
+
+post_gfx_allocator_fail:
+   kk_destroy_encoder_state(&cmd->gfx);
+gfx_allocator_fail:
+   kk_destroy_encoder_state(cmd->pre_gfx);
+pre_gfx_allocator_fail:
+   vk_command_buffer_finish(&cmd->vk);
+   result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+alloc_fail:
+   vk_free(&pool->vk.alloc, cmd);
+   return result;
+}
+
+static void
+kk_reset_encoder_state(struct kk_encoder_state *es)
+{
+   mtl_command_allocator_reset(es->allocator);
+}
+
+void
+kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+
+   /* If the command buffer was not ended, we may have lingering encoders.
+    * Call twice since post_gfx will be moved to pre_gfx but not ended. */
+   cs_end(cmd);
+   cs_end(cmd);
+   kk_cmd_release_resources(dev, cmd);
+
+   kk_reset_encoder_state(cmd->pre_gfx);
+   kk_reset_encoder_state(&cmd->gfx);
+   kk_reset_encoder_state(cmd->post_gfx);
+
+   cmd->uploader.bo = NULL;
+   cmd->uploader.offset = 0;
+
+   memset(&cmd->state, 0, sizeof(cmd->state));
+   cmd->uses_heap = false;
 }
 
 static void
@@ -105,16 +203,11 @@ kk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
 {
    struct kk_cmd_buffer *cmd =
       container_of(vk_cmd_buffer, struct kk_cmd_buffer, vk);
-   struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    vk_command_buffer_reset(&cmd->vk);
-   kk_cmd_release_resources(dev, cmd);
-
-   cmd->uploader.bo = NULL;
-   cmd->uploader.offset = 0;
-
-   memset(&cmd->state, 0, sizeof(cmd->state));
-   cmd->uses_heap = false;
+   kk_reset_cmd_buffer_internal(cmd);
+   cmd->submitted = false;
+   cmd->one_time_submit = false;
 }
 
 const struct vk_command_buffer_ops kk_cmd_buffer_ops = {
@@ -131,6 +224,8 @@ kk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
 
    kk_reset_cmd_buffer(&cmd->vk, 0u);
    vk_command_buffer_begin(&cmd->vk, pBeginInfo);
+   cmd->one_time_submit =
+      pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
    return VK_SUCCESS;
 }
@@ -139,6 +234,10 @@ VKAPI_ATTR VkResult VKAPI_CALL
 kk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+
+   /* Call twice since post_gfx will be moved to pre_gfx but not ended. */
+   cs_end(cmd);
+   cs_end(cmd);
 
    return vk_command_buffer_end(&cmd->vk);
 }
@@ -155,21 +254,165 @@ kk_can_ignore_barrier(VkAccessFlags2 access, VkPipelineStageFlags2 stage)
    return (!(access ^ ignore_access)) || (!(stage ^ ignore_stage));
 }
 
+void
+cs_start_render(struct kk_cmd_buffer *cmd)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   struct kk_graphics_state *state = &cmd->state.gfx;
+   uint32_t view_mask = state->render.view_mask;
+   assert(state->render_pass_descriptor);
+
+   cmd->gfx.cmd_buf = mtl_new_command_buffer(dev->mtl_handle);
+   mtl_begin_command_buffer(cmd->gfx.cmd_buf, cmd->gfx.allocator);
+   cmd->gfx.encoder = mtl_new_render_command_encoder_with_descriptor(
+      cmd->gfx.cmd_buf, state->render_pass_descriptor);
+
+   uint32_t layer_ids[KK_MAX_MULTIVIEW_VIEW_COUNT] = {};
+   uint32_t count = 0u;
+   u_foreach_bit(id, view_mask)
+      layer_ids[count++] = id;
+   if (view_mask == 0u) {
+      layer_ids[count++] = 0;
+   }
+   mtl_set_vertex_amplification_count(cmd->gfx.encoder, layer_ids, count);
+
+   /* Argument table won't ever change */
+   mtl_render_set_argument_table(
+      cmd->gfx.encoder, cmd->argument_table,
+      MTL_RENDER_STAGE_VERTEX | MTL_RENDER_STAGE_FRAGMENT);
+
+   kk_cmd_buffer_dirty_all_gfx(cmd);
+}
+
+mtl_render_encoder *
+cs_get_render(struct kk_cmd_buffer *cmd)
+{
+   struct kk_graphics_state *gfx = &cmd->state.gfx;
+
+   if (gfx->need_to_start_render_pass) {
+      gfx->render.samples = gfx->pipeline_sample_count;
+      mtl_render_pass_descriptor_set_default_raster_sample_count(
+         cmd->state.gfx.render_pass_descriptor, gfx->render.samples);
+      gfx->need_to_start_render_pass = false;
+      cs_start_render(cmd);
+   }
+
+   return cmd->gfx.encoder;
+}
+
+static void
+kk_start_compute_encoder(struct kk_encoder_state *es, mtl_device *handle,
+                         mtl_argument_table *argument_table)
+{
+   es->cmd_buf = mtl_new_command_buffer(handle);
+   mtl_begin_command_buffer(es->cmd_buf, es->allocator);
+   es->encoder = mtl_new_compute_command_encoder(es->cmd_buf);
+
+   /* Argument table won't ever change */
+   mtl_compute_set_argument_table(es->encoder, argument_table);
+}
+
+mtl_compute_encoder *
+cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx)
+{
+   struct kk_device *dev = kk_cmd_buffer_device(cmd);
+   mtl_compute_encoder *encoder;
+   /* If we are not inside a render, we can just take pre_gfx. */
+   if (!cmd->gfx.encoder || pre_gfx) {
+      if (!cmd->pre_gfx->encoder) {
+         kk_start_compute_encoder(cmd->pre_gfx, dev->mtl_handle,
+                                  cmd->argument_table);
+      }
+      encoder = cmd->pre_gfx->encoder;
+   } else {
+      if (!cmd->post_gfx->encoder) {
+         kk_start_compute_encoder(cmd->post_gfx, dev->mtl_handle,
+                                  cmd->argument_table);
+      }
+      encoder = cmd->post_gfx->encoder;
+   }
+
+   return encoder;
+}
+
+static void
+kk_stop_encoder(struct kk_cmd_buffer *cmd, struct kk_encoder_state *es)
+{
+   /* TODO_KOSMICKRISP This is probably overkill */
+   mtl_barrier_after_stages(es->encoder, MTL_STAGE_ALL, MTL_STAGE_ALL);
+   mtl_end_encoding(es->encoder);
+   mtl_release(es->encoder);
+   es->encoder = NULL;
+
+   /* Fold the pending timestamp counter-heap resolves into `cmd_buf` */
+   util_dynarray_foreach(&es->ts_resolves, struct kk_ts_resolve, r) {
+      mtl_command_resolve_counter_heap(es->cmd_buf, r->heap, r->index, 1u,
+                                       r->dst_addr);
+   }
+
+   util_dynarray_clear(&es->ts_resolves);
+
+   mtl_end_command_buffer(es->cmd_buf);
+
+   util_dynarray_append(&cmd->submit_cmd_bufs, es->cmd_buf);
+   es->cmd_buf = NULL;
+}
+
+void
+cs_end(struct kk_cmd_buffer *cmd)
+{
+   assert(cmd);
+
+   if (cmd->pre_gfx->encoder) {
+      /* Submit pre_gfx now that its encoder is closed. Command buffers are
+       * appended here (rather than at creation) so submit_cmd_bufs stays in
+       * encode order: pre_gfx first, then gfx below. post_gfx is promoted into
+       * the pre_gfx slot with its encoder still open, so it is submitted by a
+       * later cs_end() and therefore always ends up after gfx. This is why
+       * every flush site calls cs_end() twice. */
+      kk_stop_encoder(cmd, cmd->pre_gfx);
+
+      SWAP(cmd->pre_gfx, cmd->post_gfx);
+   } else if (cmd->post_gfx->encoder) {
+      /* No pre_gfx, but a post_gfx exists (e.g. compute issued during a render
+       * pass). Promote it so a later cs_end() closes and submits it after the
+       * gfx command buffer appended below. */
+      SWAP(cmd->pre_gfx, cmd->post_gfx);
+   }
+
+   if (cmd->gfx.encoder) {
+      kk_stop_encoder(cmd, &cmd->gfx);
+   }
+}
+
+void
+kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd, uint64_t addr)
+{
+   mtl_set_address(cmd->argument_table, addr, 0u);
+   cmd->state.root_addr = addr;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 kk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
-   enum kk_encoder_type last_used = cmd->encoder->main.last_used;
-   kk_encoder_signal_fence_and_end(cmd);
 
-   /* If we were inside a render pass, restart it loading attachments */
-   if (last_used == KK_ENC_RENDER) {
-      struct kk_graphics_state *state = &cmd->state.gfx;
-      assert(state->render_pass_descriptor);
-      kk_encoder_start_render(cmd, state->render_pass_descriptor,
-                              state->render.view_mask);
-      kk_cmd_buffer_dirty_all_gfx(cmd);
+   /* TODO_KOSMICKRISP Don't break the render pass and add a single encoder
+    * barrier. This requires to read directly from the framebuffer which
+    * requires not reading input attachments as textures.
+    */
+   if (cmd->gfx.encoder) {
+      kk_apply_attachment_store_ops(cmd, true);
+      cs_end(cmd);
+      cs_start_render(cmd);
+   } else if (cmd->pre_gfx->encoder) {
+      /* We chain encoders, so an intra-encoder barrier is enough here:
+       * no need to tear down and recreate the encoder.
+       */
+      mtl_barrier_after_encoder_stages(cmd->pre_gfx->encoder,
+                                       MTL_STAGE_DISPATCH | MTL_STAGE_BLIT,
+                                       MTL_STAGE_DISPATCH | MTL_STAGE_BLIT);
    }
 }
 
@@ -343,18 +586,6 @@ kk_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
 }
 
 void
-kk_cmd_buffer_write_descriptor_buffer(struct kk_cmd_buffer *cmd,
-                                      struct kk_descriptor_state *desc,
-                                      size_t size, size_t offset)
-{
-   assert(size + offset <= sizeof(desc->root.sets));
-
-   struct kk_ptr root_buffer = desc->root.root_buffer;
-
-   memcpy(root_buffer.cpu, (uint8_t *)desc->root.sets + offset, size);
-}
-
-void
 kk_cmd_release_dynamic_ds_state(struct kk_cmd_buffer *cmd)
 {
    if (cmd->state.gfx.is_depth_stencil_dynamic &&
@@ -465,14 +696,16 @@ kk_upload_descriptor_root(struct kk_cmd_buffer *cmd,
 {
    struct kk_descriptor_state *desc = kk_get_descriptors_state(cmd, bind_point);
    struct kk_root_descriptor_table *root = &desc->root;
-   struct kk_ptr root_gpu = kk_pool_upload(cmd, root, sizeof(*root), 8u);
-   if (unlikely(!root_gpu.gpu))
+   struct kk_ptr root_ptr = kk_pool_alloc(cmd, sizeof(*root), 8u);
+   if (unlikely(!root_ptr.gpu))
       return 0u;
 
-   root->root_buffer = root_gpu;
+   root->addr = root_ptr.gpu;
+
+   memcpy(root_ptr.cpu, root, sizeof(*root));
    desc->root_dirty = false;
 
-   return root_gpu.gpu;
+   return root_ptr.gpu;
 }
 
 void
@@ -502,14 +735,15 @@ kk_dispatch_precomp(struct kk_cmd_buffer *cmd, struct kk_grid grid,
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
    struct kk_precompiled_shader *prog = &dev->precompiled_cache.shaders[idx];
 
-   mtl_compute_encoder *encoder =
-      pre_gfx ? kk_encoder_pre_gfx_encoder(cmd) : kk_compute_encoder(cmd);
+   mtl_compute_encoder *encoder = cs_get_compute(cmd, pre_gfx);
+   mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_DISPATCH,
+                                    MTL_STAGE_DISPATCH);
 
    struct kk_ptr data_gpu = kk_pool_upload(cmd, data, data_size, 8u);
    if (unlikely(!data_gpu.gpu))
       return;
 
-   mtl_compute_set_buffer(encoder, data_gpu.buffer, data_gpu.offset, 0);
+   mtl_set_address(cmd->argument_table, data_gpu.gpu, 0u);
    mtl_compute_set_pipeline_state(encoder, prog->pipeline);
 
    struct mtl_size local_size = {
@@ -521,14 +755,21 @@ kk_dispatch_precomp(struct kk_cmd_buffer *cmd, struct kk_grid grid,
    if (grid.mode == KK_GRID_DIRECT)
       mtl_dispatch_threads(encoder, grid.size, local_size);
    else
-      mtl_dispatch_threadgroups_with_indirect_buffer(encoder, grid.indirect,
-                                                     grid.offset, local_size);
+      mtl_dispatch_threadgroups_with_indirect_buffer(encoder, grid.addr,
+                                                     local_size);
+   mtl_barrier_after_encoder_stages(encoder, MTL_STAGE_DISPATCH,
+                                    MTL_STAGE_DISPATCH);
+
+   /* Rebind the exiting root. */
+   mtl_set_address(cmd->argument_table, cmd->state.root_addr, 0u);
 }
 
 void
 kk_cmd_write(struct kk_cmd_buffer *cmd, struct libkk_imm_write write)
 {
-   util_dynarray_append(&cmd->encoder->imm_writes, write);
+   /* If we are mid render, it must go to post_gfx */
+   libkk_write_u32(cmd, kk_grid_1d(1), !cmd->gfx.encoder, write.address,
+                   write.value);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -576,4 +817,59 @@ kk_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer)
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 
    cmd->state.cond_render.enabled = false;
+}
+
+void kk_apply_attachment_store_ops(struct kk_cmd_buffer *cmd, bool force_store)
+{
+   if (!cmd->gfx.encoder)
+      return;
+
+   struct kk_rendering_state *render = &cmd->state.gfx.render;
+   mtl_render_encoder *encoder = cs_get_render(cmd);
+
+   force_store |= render->force_attachment_store;
+
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      uint32_t logical_index = cmd->state.gfx.render.color_map[i];
+
+      if (render->color_att[i].iview && logical_index != MESA_VK_ATTACHMENT_UNUSED) {
+         bool resolve = render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE;
+         bool retain = (render->color_att[i].load_op == VK_ATTACHMENT_LOAD_OP_LOAD
+            || render->color_att[i].load_op == VK_ATTACHMENT_LOAD_OP_NONE)
+            && render->color_att[i].store_op == VK_ATTACHMENT_STORE_OP_NONE;
+
+         enum mtl_store_action store_action = force_store
+            || resolve
+            || retain
+            ? MTL_STORE_ACTION_STORE
+            : vk_attachment_store_op_to_mtl_store_action(render->color_att[i].store_op);
+         mtl_render_set_color_store_action(encoder, store_action, logical_index);
+      }
+   }
+   if (render->depth_att.iview) {
+      bool resolve = render->depth_att.resolve_mode != VK_RESOLVE_MODE_NONE;
+      bool retain = (render->depth_att.load_op == VK_ATTACHMENT_LOAD_OP_LOAD ||
+                     render->depth_att.load_op == VK_ATTACHMENT_LOAD_OP_NONE) &&
+                    render->depth_att.store_op == VK_ATTACHMENT_STORE_OP_NONE;
+
+      enum mtl_store_action store_action = force_store
+            || resolve
+            || retain
+            ? MTL_STORE_ACTION_STORE
+            : vk_attachment_store_op_to_mtl_store_action(render->depth_att.store_op);
+      mtl_render_set_depth_store_action(encoder, store_action);
+   }
+   if (render->stencil_att.iview) {
+      bool resolve = render->stencil_att.resolve_mode != VK_RESOLVE_MODE_NONE;
+      bool retain = (render->stencil_att.load_op == VK_ATTACHMENT_LOAD_OP_LOAD
+         || render->stencil_att.load_op == VK_ATTACHMENT_LOAD_OP_NONE)
+         && render->stencil_att.store_op == VK_ATTACHMENT_STORE_OP_NONE;
+
+      enum mtl_store_action store_action = force_store
+            || resolve
+            || retain
+            ? MTL_STORE_ACTION_STORE
+            : vk_attachment_store_op_to_mtl_store_action(render->stencil_att.store_op);
+      mtl_render_set_stencil_store_action(encoder, store_action);
+   }
 }

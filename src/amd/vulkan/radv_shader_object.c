@@ -183,9 +183,9 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
    gfx_state.vs.has_prolog = true;
    gfx_state.ps.has_epilog = true;
    gfx_state.dynamic_rasterization_samples = true;
-   gfx_state.unknown_rast_prim = true;
    gfx_state.dynamic_provoking_vtx_mode = true;
-   gfx_state.dynamic_line_rast_mode = true;
+   gfx_state.smooth_lines_may_be_enabled = true;
+   gfx_state.rs.polygon_mode_unknown = true;
    gfx_state.ps.exports_mrtz_via_epilog = true;
 
    for (uint32_t i = 0; i < MAX_RTS; i++)
@@ -200,8 +200,8 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
       struct radv_shader_debug_info debug[MESA_VULKAN_SHADER_STAGES] = {0};
       struct radv_shader_debug_info gs_copy_debug = {0};
 
-      radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, false, false, NULL, false, debug, binaries,
-                                    &gs_copy_debug, &shader_obj->gs.copy_binary);
+      radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug,
+                                    binaries, &gs_copy_debug, &shader_obj->gs.copy_binary);
       radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &shader_obj->gs.copy_shader,
                                    shader_obj->gs.copy_binary, &gs_copy_debug);
 
@@ -232,7 +232,7 @@ radv_shader_object_init_graphics(struct radv_shader_object *shader_obj, struct r
          radv_shader_stage_init(pCreateInfo, &stages[stage]);
          stages[stage].next_stage = next_stage;
 
-         radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, false, false, NULL, false, debug,
+         radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug,
                                        binaries, &gs_copy_debug, &shader_obj->gs.copy_binary);
          radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &shader_obj->gs.copy_shader,
                                       shader_obj->gs.copy_binary, &gs_copy_debug);
@@ -281,7 +281,7 @@ radv_shader_object_init_compute(struct radv_shader_object *shader_obj, struct ra
    radv_shader_stage_init(pCreateInfo, &stage);
 
    struct radv_shader_debug_info cs_dbg = {0};
-   struct radv_shader_binary *cs_binary = radv_compile_cs(&device->compiler_info, &stage, false, false, false, &cs_dbg);
+   struct radv_shader_binary *cs_binary = radv_compile_cs(&device->compiler_info, &stage, false, &cs_dbg);
    struct radv_shader *cs_shader = radv_shader_create(device, NULL, cs_binary, true, &cs_dbg);
 
    ralloc_free(stage.nir);
@@ -447,9 +447,9 @@ radv_shader_object_create_linked(VkDevice _device, uint32_t createInfoCount, con
    gfx_state.vs.has_prolog = true;
    gfx_state.ps.has_epilog = true;
    gfx_state.dynamic_rasterization_samples = true;
-   gfx_state.unknown_rast_prim = true;
    gfx_state.dynamic_provoking_vtx_mode = true;
-   gfx_state.dynamic_line_rast_mode = true;
+   gfx_state.smooth_lines_may_be_enabled = true;
+   gfx_state.rs.polygon_mode_unknown = true;
    gfx_state.ps.exports_mrtz_via_epilog = true;
 
    for (uint32_t i = 0; i < MAX_RTS; i++)
@@ -526,7 +526,7 @@ radv_shader_object_create_linked(VkDevice _device, uint32_t createInfoCount, con
    struct radv_shader_binary *gs_copy_binary = NULL;
    struct radv_shader_debug_info gs_copy_debug = {0};
 
-   radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, false, false, NULL, false, debug, binaries,
+   radv_graphics_shaders_compile(&device->compiler_info, NULL, stages, &gfx_state, false, NULL, false, debug, binaries,
                                  &gs_copy_debug, &gs_copy_binary);
    radv_graphics_shaders_create(device, NULL, true, shaders, binaries, debug, &gs_copy_shader, gs_copy_binary,
                                 &gs_copy_debug);

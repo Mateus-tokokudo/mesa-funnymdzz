@@ -10,80 +10,11 @@
 #include "r300_screen.h"
 #include "r300_reg.h"
 
-#include "tgsi/tgsi_dump.h"
-
 #include "compiler/nir_to_rc.h"
+#include "compiler/r300_nir.h"
 #include "compiler/radeon_compiler.h"
 #include "nir/nir.h"
 
-/* Convert info about VS output semantics into r300_shader_semantics. */
-static void r300_shader_read_vs_outputs(
-    struct r300_context *r300,
-    struct tgsi_shader_info* info,
-    struct r300_shader_semantics* vs_outputs)
-{
-    int i;
-    unsigned index;
-
-    r300_shader_semantics_reset(vs_outputs);
-
-    for (i = 0; i < info->num_outputs; i++) {
-        index = info->output_semantic_index[i];
-
-        switch (info->output_semantic_name[i]) {
-            case TGSI_SEMANTIC_POSITION:
-                assert(index == 0);
-                vs_outputs->pos = i;
-                break;
-
-            case TGSI_SEMANTIC_PSIZE:
-                assert(index == 0);
-                vs_outputs->psize = i;
-                break;
-
-            case TGSI_SEMANTIC_COLOR:
-                assert(index < ATTR_COLOR_COUNT);
-                vs_outputs->color[index] = i;
-                break;
-
-            case TGSI_SEMANTIC_BCOLOR:
-                assert(index < ATTR_COLOR_COUNT);
-                vs_outputs->bcolor[index] = i;
-                break;
-
-            case TGSI_SEMANTIC_GENERIC:
-                assert(index < ATTR_GENERIC_COUNT);
-                vs_outputs->generic[index] = i;
-                vs_outputs->num_generic++;
-                break;
-
-            case TGSI_SEMANTIC_FOG:
-                assert(index == 0);
-                vs_outputs->fog = i;
-                break;
-
-            case TGSI_SEMANTIC_EDGEFLAG:
-                assert(index == 0);
-                fprintf(stderr, "r300 VP: cannot handle edgeflag output.\n");
-                break;
-
-            case TGSI_SEMANTIC_CLIPVERTEX:
-                assert(index == 0);
-                /* Draw does clip vertex for us. */
-                if (r300->screen->caps.has_tcl) {
-                    UNREACHABLE("");
-                }
-                break;
-
-            default:
-                fprintf(stderr, "r300 VP: unknown vertex output semantic: %i.\n",
-                        info->output_semantic_name[i]);
-        }
-    }
-
-    /* WPOS is a straight copy of POSITION */
-    vs_outputs->wpos = i;
-}
 
 static void set_vertex_inputs_outputs(struct r300_vertex_program_compiler * c)
 {
@@ -148,15 +79,8 @@ static void set_vertex_inputs_outputs(struct r300_vertex_program_compiler * c)
     }
 
     /* WPOS. */
-    if (vs->wpos)
+    if (vs->key.wpos)
         c->code->outputs[outputs->wpos] = reg++;
-}
-
-void r300_init_vs_outputs(struct r300_context *r300,
-                          struct r300_vertex_shader *vs)
-{
-    tgsi_scan_shader(vs->state.tokens, &vs->shader->info);
-    r300_shader_read_vs_outputs(r300, &vs->shader->info, &vs->shader->outputs);
 }
 
 static void r300_setup_vs_compiler(struct r300_context *r300,
@@ -203,10 +127,28 @@ void r300_translate_vertex_shader(struct r300_context *r300,
     r300_setup_vs_compiler(r300, &compiler, vs);
 
     nir_shader *clone = nir_shader_clone(NULL, shader->state.ir.nir);
+    if (vs->key.frontface)
+        NIR_PASS(_, clone, r300_nir_lower_frontface);
+
+    nir_variable *wpos_var = NULL;
+    if (vs->key.wpos)
+        NIR_PASS(_, clone, r300_nir_add_wpos, &wpos_var);
+
+    int wpos_output = wpos_var ? wpos_var->data.driver_location : ATTR_UNUSED;
     struct r300_fragment_program_external_state external_state = {};
     nir_to_rc(clone, (struct pipe_screen *)r300->screen,
               external_state, code, &compiler.Base);
-    vs->outputs.wpos = vs->outputs.num_total;
+
+    if (wpos_output != ATTR_UNUSED) {
+        vs->outputs.wpos = wpos_output;
+        for (unsigned i = 0; i < ATTR_GENERIC_COUNT; i++) {
+            if (vs->outputs.generic[i] == wpos_output) {
+                vs->outputs.generic[i] = ATTR_UNUSED;
+                vs->outputs.num_generic--;
+                break;
+            }
+        }
+    }
 
     /* Nothing to do if the shader does not write gl_Position. */
     if (vs->outputs.pos == ATTR_UNUSED) {
@@ -225,12 +167,8 @@ void r300_translate_vertex_shader(struct r300_context *r300,
         compiler.Base.remove_unused_constants = true;
     }
 
-    compiler.RequiredOutputs = ~(~0U << (vs->outputs.num_total + (vs->wpos ? 1 : 0)));
+    compiler.RequiredOutputs = ~(~0U << vs->outputs.num_total);
     compiler.SetHwInputOutput = &set_vertex_inputs_outputs;
-
-    /* Insert the WPOS output. */
-    if (vs->wpos)
-        rc_copy_output(&compiler.Base, vs->outputs.pos, vs->outputs.wpos);
 
     /* Invoke the compiler */
     r3xx_compile_vertex_program(&compiler);

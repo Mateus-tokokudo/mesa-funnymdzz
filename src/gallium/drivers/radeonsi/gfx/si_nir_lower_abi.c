@@ -51,7 +51,7 @@ static nir_def *build_attr_ring_desc(nir_builder *b, struct si_shader *shader,
    nir_def *attr_address =
       b->shader->info.stage == MESA_SHADER_VERTEX && b->shader->info.vs.blit_sgprs_amd ?
       ac_nir_load_arg_at_offset(b, &args->ac, args->vs_blit_inputs,
-                                b->shader->info.vs.blit_sgprs_amd - 1) :
+                                b->shader->info.vs.blit_sgprs_amd - 1, false) :
       ac_nir_load_arg(b, &args->ac, args->gs_attr_address);
 
    unsigned per_vertex_params = MAX2(1, si_shader_num_alloc_param_exports(shader));
@@ -60,6 +60,7 @@ static nir_def *build_attr_ring_desc(nir_builder *b, struct si_shader *shader,
    uint32_t desc[4];
 
    ac_build_attr_ring_descriptor(sel->screen->info.gfx_level,
+                                 sel->screen->info.compiler_info.has_desc_resource_level,
                                  (uint64_t)sel->screen->info.address32_hi << 32,
                                  0xffffffff, stride, desc);
 
@@ -80,8 +81,9 @@ static nir_def *build_tess_ring_desc(nir_builder *b, struct si_screen *screen,
    uint32_t desc[4];
 
    ac_build_raw_buffer_descriptor(screen->info.gfx_level,
-                             (uint64_t)screen->info.address32_hi << 32,
-                             0xffffffff, desc);
+                                  screen->info.compiler_info.has_desc_resource_level,
+                                  (uint64_t)screen->info.address32_hi << 32,
+                                  0xffffffff, desc);
 
    nir_def *comp[4] = {
       addr,
@@ -162,6 +164,7 @@ static bool build_gsvs_ring_desc(nir_builder *b, struct lower_abi_state *s)
             .index_stride = 1,
             .add_tid = true,
             .gfx10_oob_select = V_008F0C_OOB_SELECT_DISABLED,
+            .has_desc_resource_level = sel->screen->info.compiler_info.has_desc_resource_level,
          };
          uint32_t tmp_desc[4];
 
@@ -198,6 +201,7 @@ static nir_def *build_task_ring_desc(nir_builder *b, struct lower_abi_state *s,
       .format = PIPE_FORMAT_R32_FLOAT,
       .swizzle = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W },
       .gfx10_oob_select = V_008F0C_OOB_SELECT_DISABLED,
+      .has_desc_resource_level = screen->info.compiler_info.has_desc_resource_level,
    };
 
    unsigned desc[4];
@@ -227,6 +231,7 @@ static nir_def *build_mesh_scratch_ring_desc(nir_builder *b, struct lower_abi_st
       .format = PIPE_FORMAT_R32_FLOAT,
       .swizzle = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y, PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W },
       .gfx10_oob_select = V_008F0C_OOB_SELECT_DISABLED,
+      .has_desc_resource_level = screen->info.compiler_info.has_desc_resource_level,
    };
 
    unsigned desc[4];
@@ -341,9 +346,6 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
    case nir_intrinsic_load_patch_vertices_in:
       replacement =
          nir_iadd_imm(b, ac_nir_unpack_arg(b, &args->ac, args->ac.tcs_offchip_layout, 7, 5), 1);
-      break;
-   case nir_intrinsic_load_sample_mask_in:
-      replacement = ac_nir_load_arg(b, &args->ac, args->ac.sample_coverage);
       break;
    case nir_intrinsic_load_lshs_vertex_stride_amd:
       if (stage == MESA_SHADER_VERTEX) {
@@ -580,7 +582,7 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       nir_def *color[4];
       for (int i = 0; i < 4; i++) {
          if (colors_read & BITFIELD_BIT(start + i))
-            color[i] = ac_nir_load_arg_at_offset(b, &args->ac, args->color_start, offset++);
+            color[i] = ac_nir_load_arg_at_offset(b, &args->ac, args->color_start, offset++, false);
          else
             color[i] = nir_undef(b, 1, 32);
       }
@@ -694,6 +696,9 @@ static bool lower_intrinsic(nir_builder *b, nir_instr *instr, struct lower_abi_s
       break;
    case nir_intrinsic_load_ring_mesh_scratch_amd:
       replacement = build_mesh_scratch_ring_desc(b, s);
+      break;
+   case nir_intrinsic_load_use_sample_mask_in_amd:
+      replacement = nir_imm_true(b);
       break;
    default:
       return false;

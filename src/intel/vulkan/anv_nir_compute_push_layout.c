@@ -348,7 +348,7 @@ load_push_data_from_ptr(nir_builder *b,
     */
    if (nir_src_is_const(offset)) {
       nir_block *block = nir_cursor_current_block(b->cursor);
-      nir_function_impl *impl = nir_cf_node_get_function(&block->cf_node);
+      nir_function_impl *impl = block->impl;
       b->cursor = nir_before_impl(impl);
    }
 
@@ -501,6 +501,15 @@ lower_to_push_data_intel(nir_builder *b,
    }
 }
 
+static inline bool
+stage_has_inline_param(const struct intel_device_info *devinfo, mesa_shader_stage stage)
+{
+   return devinfo->verx10 >= 125 &&
+          (stage == MESA_SHADER_TASK ||
+           stage == MESA_SHADER_MESH ||
+           stage == MESA_SHADER_COMPUTE);
+}
+
 static struct anv_push_range
 compute_final_push_range(const nir_shader *nir,
                          const struct intel_device_info *devinfo,
@@ -539,11 +548,7 @@ compute_final_push_range(const nir_shader *nir,
     * (unlike all Gfx stages) and so we can bound+align the allocation there
     * (see anv_cmd_buffer_cs_push_constants).
     */
-   const bool has_inline_param =
-      devinfo->verx10 >= 125 &&
-      (nir->info.stage == MESA_SHADER_TASK ||
-       nir->info.stage == MESA_SHADER_MESH ||
-       nir->info.stage == MESA_SHADER_COMPUTE);
+   const bool has_inline_param = stage_has_inline_param(devinfo, nir->info.stage);
 
    map->inline_dwords_count = 0;
 
@@ -645,11 +650,11 @@ anv_nir_compute_push_layout(nir_shader *nir,
        (nir->info.inputs_read & VARYING_BIT_PRIMITIVE_ID));
 
    unsigned n_push_ranges = 0;
-   unsigned total_push_regs = 0;
+   unsigned total_push_size = 0;
 
    if (push_constant_range.length > 0) {
       map->push_ranges[n_push_ranges++] = push_constant_range;
-      total_push_regs += push_constant_range.length;
+      total_push_size += push_constant_range.length * 32;
    }
 
    struct anv_push_range analysis_ranges[4] = {};
@@ -659,15 +664,16 @@ anv_nir_compute_push_layout(nir_shader *nir,
    }
 
    const unsigned max_push_buffers = needs_padding_per_primitive ? 3 : 4;
-   const unsigned max_push_regs = needs_padding_per_primitive ? 63 : 64;
+   const unsigned max_push_size =
+      32 * (needs_padding_per_primitive ? 63 : 64);
 
    for (unsigned i = 0; i < 4; i++) {
       struct anv_push_range *candidate_range = &analysis_ranges[i];
       if (n_push_ranges >= max_push_buffers)
          break;
 
-      if (candidate_range->length + total_push_regs > max_push_regs)
-         candidate_range->length = max_push_regs - total_push_regs;
+      if ((candidate_range->length * 32 + total_push_size) > max_push_size)
+         candidate_range->length = (max_push_size - total_push_size) / 32;
 
       if (candidate_range->length == 0)
          break;
@@ -678,7 +684,7 @@ anv_nir_compute_push_layout(nir_shader *nir,
       }
 
       map->push_ranges[n_push_ranges++] = *candidate_range;
-      total_push_regs += candidate_range->length;
+      total_push_size += candidate_range->length * 32;
    }
 
    /* Pass a single-register push constant payload for the PS stage even if
@@ -708,7 +714,10 @@ anv_nir_compute_push_layout(nir_shader *nir,
       map->push_ranges[n_push_ranges++] = push_constant_padding_range;
    }
 
-   assert(n_push_ranges <= 4);
+   if (!stage_has_inline_param(devinfo, nir->info.stage)) {
+      assert(n_push_ranges <= 4);
+      assert(total_push_size <= max_push_size);
+   }
 
    struct lower_to_push_data_intel_state lower_state = {
       .devinfo = devinfo,

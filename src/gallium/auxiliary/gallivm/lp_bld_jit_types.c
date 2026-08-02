@@ -54,30 +54,6 @@ lp_build_create_jit_buffer_type(struct gallivm_state *gallivm)
    return buffer_type;
 }
 
-LLVMValueRef
-lp_llvm_descriptor_base(struct gallivm_state *gallivm,
-                        LLVMValueRef buffers_ptr,
-                        LLVMValueRef index, unsigned buffers_limit)
-{
-   LLVMBuilderRef builder = gallivm->builder;
-
-   LLVMValueRef desc_set_index = LLVMBuildExtractValue(builder, index, 0, "");
-   if (LLVMGetTypeKind(LLVMTypeOf(desc_set_index)) == LLVMVectorTypeKind)
-      desc_set_index = LLVMBuildExtractElement(builder, desc_set_index, lp_build_const_int32(gallivm, 0), "");
-   LLVMValueRef desc_set_base = lp_llvm_buffer_base(gallivm, buffers_ptr, desc_set_index, buffers_limit);
-
-   LLVMValueRef binding_index = LLVMBuildExtractValue(builder, index, 1, "");
-   if (LLVMGetTypeKind(LLVMTypeOf(binding_index)) == LLVMVectorTypeKind)
-      binding_index = LLVMBuildExtractElement(builder, binding_index, lp_build_const_int32(gallivm, 0), "");
-
-   LLVMValueRef binding_offset = LLVMBuildMul(builder, binding_index, lp_build_const_int32(gallivm, sizeof(struct lp_descriptor)), "");
-   LLVMTypeRef int64_type = LLVMInt64TypeInContext(gallivm->context);
-   binding_offset = LLVMBuildIntCast2(builder, binding_offset, int64_type, false, "");
-
-   LLVMValueRef desc_ptr = LLVMBuildPtrToInt(builder, desc_set_base, int64_type, "");
-   return LLVMBuildAdd(builder, desc_ptr, binding_offset, "");
-}
-
 static LLVMValueRef
 lp_llvm_buffer_member(struct gallivm_state *gallivm,
                       LLVMValueRef buffers_ptr,
@@ -145,6 +121,7 @@ lp_build_create_jit_texture_type(struct gallivm_state *gallivm)
    /* struct lp_jit_texture */
    elem_types[LP_JIT_SAMPLER_INDEX_DUMMY] =
    elem_types[LP_JIT_TEXTURE_WIDTH] = LLVMInt32TypeInContext(lc);
+   elem_types[LP_JIT_TEXTURE_VIEW_MIN_LOD] = LLVMFloatTypeInContext(lc);
    elem_types[LP_JIT_TEXTURE_HEIGHT] =
    elem_types[LP_JIT_TEXTURE_DEPTH] = LLVMInt16TypeInContext(lc);
    elem_types[LP_JIT_TEXTURE_FIRST_LEVEL] =
@@ -185,6 +162,9 @@ lp_build_create_jit_texture_type(struct gallivm_state *gallivm)
    LP_CHECK_MEMBER_OFFSET(struct lp_jit_texture, mip_offsets,
                           gallivm->target, texture_type,
                           LP_JIT_TEXTURE_MIP_OFFSETS);
+   LP_CHECK_MEMBER_OFFSET(struct lp_jit_texture, view_min_lod,
+                          gallivm->target, texture_type,
+                          LP_JIT_TEXTURE_VIEW_MIN_LOD);
    LP_CHECK_STRUCT_SIZE(struct lp_jit_texture,
                         gallivm->target, texture_type);
    return texture_type;
@@ -351,6 +331,9 @@ lp_build_llvm_texture_member(struct gallivm_state *gallivm,
       case LP_JIT_SAMPLER_INDEX_DUMMY:
          LLVMBuildStore(builder, LLVMConstInt(int32, gallivm->texture_dynamic_state->sampler_index, false), ptr);
          break;
+      case LP_JIT_TEXTURE_VIEW_MIN_LOD:
+         LLVMBuildStore(builder, LLVMConstReal(LLVMFloatTypeInContext(gallivm->context), gallivm->texture_dynamic_state->view_min_lod), ptr);
+         break;
       case LP_JIT_TEXTURE_WIDTH:
          LLVMBuildStore(builder, LLVMConstInt(int32, gallivm->texture_dynamic_state->width, false), ptr);
          break;
@@ -389,7 +372,7 @@ lp_build_llvm_texture_member(struct gallivm_state *gallivm,
       }
       }
    } else if (gallivm->texture_descriptor) {
-      static_assert(offsetof(struct lp_descriptor, texture) == 0, "Invalid texture offset!");
+      static_assert(offsetof(struct lp_image_descriptor, texture) == 0, "Invalid texture offset!");
       LLVMValueRef texture_ptr = gallivm->texture_descriptor;
 
       LLVMTypeRef texture_ptr_type = LLVMStructGetTypeAtIndex(resources_type, LP_JIT_RES_TEXTURES);
@@ -446,6 +429,37 @@ lp_build_llvm_texture_member(struct gallivm_state *gallivm,
 }
 
 static LLVMValueRef
+lp_build_llvm_texture_view_min_lod(struct gallivm_state *gallivm,
+                                   LLVMTypeRef resources_type,
+                                   LLVMValueRef resources_ptr,
+                                   unsigned texture_unit,
+                                   LLVMValueRef texture_unit_offset)
+{
+   if (gallivm->texture_dynamic_state) {
+      return lp_build_const_float(gallivm, gallivm->texture_dynamic_state->view_min_lod);
+   } else if (gallivm->texture_descriptor) {
+      LLVMBuilderRef builder = gallivm->builder;
+      LLVMTypeRef float_type = LLVMFloatTypeInContext(gallivm->context);
+
+      LLVMValueRef ptr = LLVMBuildAdd(builder, gallivm->texture_descriptor,
+                                      lp_build_const_int64(gallivm,
+                                         offsetof(struct lp_image_descriptor, texture.view_min_lod)),
+                                      "");
+      ptr = LLVMBuildIntToPtr(builder, ptr, LLVMPointerType(float_type, 0), "");
+
+      return LLVMBuildLoad2(builder, float_type, ptr, "view_min_lod");
+   } else {
+      LLVMValueRef val =
+         lp_build_llvm_texture_member(gallivm, resources_type, resources_ptr,
+                                      texture_unit, texture_unit_offset,
+                                      LP_JIT_TEXTURE_VIEW_MIN_LOD, "view_min_lod",
+                                      true, NULL);
+      return val;
+   }
+}
+
+
+static LLVMValueRef
 lp_build_llvm_texture_residency(struct gallivm_state *gallivm,
                                       LLVMTypeRef resources_type,
                                       LLVMValueRef resources_ptr,
@@ -456,7 +470,7 @@ lp_build_llvm_texture_residency(struct gallivm_state *gallivm,
 
    LLVMValueRef residency_ptr_ptr = gallivm->texture_descriptor;
    residency_ptr_ptr = LLVMBuildAdd(builder, residency_ptr_ptr,
-                                    lp_build_const_int64(gallivm, offsetof(struct lp_descriptor, texture.residency)), "");
+                                    lp_build_const_int64(gallivm, offsetof(struct lp_image_descriptor, texture.residency)), "");
 
    LLVMTypeRef residency_type = LLVMPointerType(LLVMInt8TypeInContext(gallivm->context), 0);
    residency_ptr_ptr = LLVMBuildIntToPtr(builder, residency_ptr_ptr, LLVMPointerType(residency_type, 0), "");
@@ -475,7 +489,7 @@ lp_build_llvm_texture_base_offset(struct gallivm_state *gallivm,
 
    LLVMValueRef base_offset_ptr = gallivm->texture_descriptor;
    base_offset_ptr = LLVMBuildAdd(builder, base_offset_ptr,
-                                  lp_build_const_int64(gallivm, offsetof(struct lp_descriptor, texture.base_offset)), "");
+                                  lp_build_const_int64(gallivm, offsetof(struct lp_image_descriptor, texture.base_offset)), "");
 
    LLVMTypeRef base_offset_type = LLVMInt32TypeInContext(gallivm->context);
    base_offset_ptr = LLVMBuildIntToPtr(builder, base_offset_ptr, LLVMPointerType(base_offset_type, 0), "");
@@ -551,7 +565,7 @@ lp_build_llvm_sampler_member(struct gallivm_state *gallivm,
 
    LLVMValueRef ptr;
    if (gallivm->sampler_descriptor) {
-      LLVMValueRef sampler_offset = lp_build_const_int64(gallivm, offsetof(struct lp_descriptor, sampler));
+      LLVMValueRef sampler_offset = lp_build_const_int64(gallivm, offsetof(struct lp_sampler_descriptor, jit));
       LLVMValueRef sampler_ptr = LLVMBuildAdd(builder, gallivm->sampler_descriptor, sampler_offset, "");
 
       LLVMTypeRef sampler_ptr_type = LLVMStructGetTypeAtIndex(resources_type, LP_JIT_RES_SAMPLERS);
@@ -635,7 +649,7 @@ lp_build_llvm_image_member(struct gallivm_state *gallivm,
 
    LLVMValueRef ptr;
    if (gallivm->texture_descriptor) {
-      LLVMValueRef image_offset = lp_build_const_int64(gallivm, offsetof(struct lp_descriptor, image));
+      LLVMValueRef image_offset = lp_build_const_int64(gallivm, offsetof(struct lp_image_descriptor, image));
       LLVMValueRef image_ptr = LLVMBuildAdd(builder, gallivm->texture_descriptor, image_offset, "");
 
       LLVMTypeRef image_ptr_type = LLVMStructGetTypeAtIndex(resources_type, LP_JIT_RES_IMAGES);
@@ -749,6 +763,8 @@ lp_build_jit_fill_sampler_dynamic_state(struct lp_sampler_dynamic_state *state)
    state->max_lod = lp_build_llvm_sampler_max_lod;
    state->lod_bias = lp_build_llvm_sampler_lod_bias;
    state->border_color = lp_build_llvm_sampler_border_color;
+
+   state->view_min_lod = lp_build_llvm_texture_view_min_lod;
 }
 
 void

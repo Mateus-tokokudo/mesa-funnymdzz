@@ -62,6 +62,7 @@ def op(name: str, num_srcs: int, types: str | None = None,
                             extra_struct_)
 
 
+op('nop', 0, 'untyped', Props.NO_DEST)
 op('and', 2, 'u1 u16 u32', Props.NEGATE | Props.CMOD | Props.COMMUTATIVE)
 op('or',  2, 'u1 u16 u32', Props.NEGATE | Props.CMOD | Props.COMMUTATIVE)
 op('xor', 2, 'u1 u16 u32', Props.NEGATE | Props.CMOD | Props.COMMUTATIVE)
@@ -75,31 +76,30 @@ op('avg',   2, 's16 s32 u16 u32', Props.NEGATE | Props.CMOD)
 op('bfe',   3, 'u32 s32', Props.NEGATE0)
 op('bfi1',  2, 'u32')
 op('bfi2',  3, 'u32')
-op('bfn',   3, 'u32', Props.CMOD, ['uint8_t ctrl'])
+op('bfn',   3, 'u16 u32', Props.CMOD, ['uint8_t ctrl'])
 op('bfrev', 1, 'u32', Props.NEGATE)
 op('cbit',  1, 'u32')
 op('cmp',   2, 'u32', Props.NEGATE | Props.CMOD)
-
 
 # With an 8/16-bit type, `index` specifies the element index of the source
 # within the 32-bit word. For example, if src_type == U16 and index == 1, this
 # converts the upper 16-bits of the input.
 op('cvt', 1, 'u8 s8 u16 s16 u32 s32 u64 s64 f32 f64 f16 bf16',
    Props.NEGATE | Props.SAT | Props.CMOD, [
-    'enum jay_type src_type',
-    'enum jay_rounding_mode rounding_mode',
-    'uint8_t index',
-    'uint8_t pad'
-])
+       'enum jay_type src_type',
+       'enum jay_rounding_mode rounding_mode',
+       'uint8_t index',
+       'uint8_t pad'
+   ])
 
 op('fbh',        1, 'u32 s32')
 op('fbl',        1, 'u32')
 op('lzd',        1, 'u32')
 op('frc',        1, 'f32 f64', Props.NEGATE | Props.CMOD)
 op('mad',        3, 'u32 s32 u16 s16 f32 f64 f16 bf16',
-   Props.NEGATE | Props.SAT | Props.CMOD | Props.COMMUTATIVE)
+   Props.NEGATE | Props.SAT | Props.CMOD)
 op('mac',        3, 'f32', Props.NEGATE | Props.SAT | Props.CMOD |
-                           Props.COMMUTATIVE)
+   Props.COMMUTATIVE)
 op('max',        2, 'u32 s32 u64 s64 u16 s16 f32 f64 f16 bf16',
    Props.NEGATE | Props.SAT | Props.COMMUTATIVE)
 op('min',        2, 'u32 s32 u64 s64 u16 s16 f32 f64 f16 bf16',
@@ -113,7 +113,7 @@ op('mul_high',   2, 'u32 s32', Props.COMMUTATIVE)
 op('mul_32x16',  2, 'u32 s32')
 op('mul_32',     2, 'u32 s32', Props.COMMUTATIVE, ['bool high'])
 op('sel',        3, 'u32 f32 s32 u1 s16 u16 f16', Props.NEGATE)
-op('csel',       3, 'u32 s32 f32', Props.NEGATE)
+op('csel',       3, 'u16 u32 s32 f16 f32', Props.NEGATE)
 op('dp4a_uu',    3, 'u32', Props.SAT)
 op('dp4a_ss',    3, 's32', Props.SAT)
 op('dp4a_su',    3, 's32', Props.SAT)
@@ -133,21 +133,24 @@ op('schedule_barrier', 0, None, Props.NO_DEST)
 
 for n in ['brd', 'illegal', 'goto', 'join', 'if', 'else',
           'endif', 'while', 'break', 'cont', 'call', 'calla', 'jmpi', 'ret',
-          'loop_once']:
+          'loop_once', 'halt_target', 'loop_once_halt']:
     op(n, 0, None, Props.NO_DEST)
 
+op('halt', 0, None, Props.NO_DEST, ['bool predicate_all'])
+
 op('send', 4, None, Props.SIDE_EFFECTS, [
-    'enum brw_sfid sfid',
+    'gen_sfid sfid',
     'uint8_t sbid',
     'bool eot',
     'bool check_tdr',
-    'bool uniform',
     'bool bindless',
     'bool pure',
+    'bool skip_helpers',
     'enum jay_type type_0',
     'enum jay_type type_1',
+    'uint8_t mlen',
     'uint8_t ex_mlen',
-    'bool pad[3]',
+    'bool pad[1]',
     'uint32_t ex_desc_imm',
 ])
 
@@ -156,20 +159,8 @@ op('preload', 0, 'u32',     0, ['unsigned reg'])
 op('deswizzle_odd', 2, 'f32', 0, ['bool src2_hi'])
 op('deswizzle_even', 1, 'f32', 0, ['bool src_hi'])
 
-# Calculating the lane ID requires multiple power-of-two steps each involving
-# complex architectural features not modelled in the IR.
-op('lane_id_8', 0, 'u16')
-op('lane_id_expand', 1, 'u16', 0, ['unsigned width'])
-
-# Fill a scalar GPR from a contiguous UGPR[16] range containing words or bytes.
-# src_type can be either U8 or U16 (only).  For U8, stride can be 1 or 2, and
-# index can be either 0 or 1.  For U16, both stride and index must be 0.
-op('gpr_from_ugprs', 1, 'u32', 0, [
-    'enum jay_type src_type',
-    'uint8_t stride',
-    'uint8_t index',
-    'uint8_t pad',
-])
+# Return the UGPR[4] vector base + (0, 1, 2, 3, 4, 5, 6, 7) as packed 16-bit.
+op('lane_id_8', 0, 'u16', 0, ['unsigned base'])
 
 # Build a GPR from two UGPR[16] ranges.
 op('zip_ugpr16', 2, 'u32')
@@ -178,23 +169,16 @@ op('zip_ugpr16', 2, 'u32')
 op('extract_byte_per_8lanes', 2, 'u32')
 op('shr_odd_subspans_by_4', 1, 'u16')
 op('and_u32_u16', 2, 'u32')
-
-# Copy the first byte of each lane, treating the destination as if it were
-# effectively JAY_STRIDE_1 (which doesn't exist).  Because the destination
-# doesn't follow proper lane alignments, this should not write to GPRs.
-# This is used for stencil outputs in render target write messages.
-op('byte_pack', 1, 'u32')
-
-# Similar to byte_pack, but for words
-op('word_pack', 1, 'u32')
+op('and_s32_sN', 2, 's32', 0, ['unsigned n'])
 
 # Pixel coord calculations. expand_quad replicates out the per-2x2 values from
 # its source g0.[10...13] and - in the case of SIMD32 - g1.[10...13] into a
 # per-lane value. Then offset_packed_pixel_coords adds the appropriate packed
 # 2x16-bit offset within each quad, giving 2x16-bit per-lane coordinates.
 op('expand_quad', 2, 'u32')
-op('offset_packed_pixel_coords', 1, 'u32')
-op('extract_layer', 2, 'u32')
+op('offset_packed_pixel_coords', 2, 'u32')
+op("coarse_pixel_corners", 1, 'u32')
+op('extract_subspan_info', 2, 'u32', Props.CMOD, ['uint16_t mask'])
 
 # Phi function representations
 #
@@ -231,16 +215,43 @@ op('unit_test', 1, 'u32', Props.NO_DEST)
 op('undef', 0, 'u1 u32')
 
 op('not', 1, 'u1 u32', Props.CMOD)
-op('cast_canonical_to_flag', 1, 'u1')
 
 op('mov_imm64', 0, 'u64', 0, ['uint64_t imm'])
-op('zero_flag', 0, 'u1', Props.NO_DEST, ['unsigned reg'])
 
 # Cross-lane shuffle. src0=data, src1=offset in bytes. Clobbers an address reg.
 op('shuffle', 2, 'u1 u32')
 
+# Indirect move. src0=data, src1=offset in bytes. Clobbers an address reg.
+op('vector_extract', 2, 'u8 u16 u32')
+
 # Shuffle with a constant lane index.
 op('broadcast_imm', 1, 'u1 u32', 0, ['unsigned lane'])
+
+# Follows hardware source order: C B A.  Data is already packed u32 slots
+# by NIR, types are used when making the gen_inst.
+op('dpas', 3, 'u32', 0, [
+    'uint8_t sdepth',
+    'uint8_t rcount',
+    'enum jay_type acc_type',
+    'enum jay_type src_type',
+    'uint8_t sbid',
+    'uint8_t pad[3]',
+])
+
+# Pack/unpack multiple sources to/from a single 32-bit def.
+op('slice_repack', 1, 'u32', 0, [
+   'uint8_t factor_log2',
+   'bool unpack',
+   ])
+
+# Active lanes select source 0, inactive lanes select the constant value
+op('sel_active', 1, 'u32 u64', 0, ['uint64_t value'])
+
+# Compare the arguments and demote based on the result.
+op('demote', 2, 'u1 u16 u32 u64 s16 s32 s64 f16 f32 f64', Props.NEGATE | Props.NO_DEST)
+
+# Copy the is_helper flag.
+op('is_helper', 0, 'u1 u32')
 
 OPCODES = _opcodes
 
@@ -249,7 +260,7 @@ ENUMS: 'Mapping[str, tuple[str, list[str]]]' = {
                                               'xyxy', 'zwzw', 'xxzz', 'yyww']),
     'jay_rounding_mode': ('JAY', ['round', 'rne', 'ru', 'rd', 'rtz']),
     'jay_math': ('JAY_MATH', ['_', 'inv', 'log', 'exp', 'sqrt', 'rsq', 'sin', 'cos']),
-    'brw_sfid': ('BRW_SFID', ['null', 'sampler', 'message_gateway',
+    'gen_sfid': ('GEN_SFID', ['null', 'sampler', 'message_gateway',
                               'render_cache', 'urb', 'bindless_thread_dispatch',
                               'ray_trace_accelerator', 'hdc0',
                               'pixel_interpolator', 'tgm', 'slm', 'ugm']),

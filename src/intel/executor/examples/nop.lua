@@ -1,6 +1,6 @@
-execute {
-  src = [[
-    nop;
+execute [[
+    @param autoswsb
+
+    nop (8)
     @eot
-  ]],
-}
+]]

@@ -7,6 +7,7 @@
 #include "blorp_priv.h"
 #include "blorp_shaders.h"
 
+#pragma pack(push, 1)
 struct blorp_indirect_copy_mem2img_key {
    struct blorp_base_key base;
 
@@ -27,6 +28,7 @@ struct blorp_indirect_copy_mem2img_key {
    uint16_t format_bh;
    uint16_t format_bd;
 };
+#pragma pack(pop)
 
 /* Refer to struct blorp_wm_inputs_indirect. */
 struct blorp_indirect_vars {
@@ -214,10 +216,10 @@ blorp_get_copy_mem_indirect_kernel_cs(struct blorp_batch *batch,
                                       prog.prog_data, prog.prog_data_size,
                                       &params->cs_prog_kernel,
                                       &params->cs_prog_data);
+   assert(result);
 
    ralloc_free(mem_ctx);
    return result;
-
 }
 
 static bool
@@ -245,6 +247,7 @@ blorp_get_copy_mem2img_indirect_kernel_cs(struct blorp_batch *batch,
                                       prog.prog_data, prog.prog_data_size,
                                       &params->cs_prog_kernel,
                                       &params->cs_prog_data);
+   assert(result);
 
    ralloc_free(mem_ctx);
    return result;
@@ -273,8 +276,7 @@ blorp_copy_memory_indirect(struct blorp_batch *batch,
    params.wm_inputs.indirect.copy_count = copy_count;
 
    if (!blorp_get_copy_mem_indirect_kernel_cs(batch, &params)) {
-      mesa_loge("failed to get copy_memory_indirect CS kernel");
-      assert(false);
+      mesa_loge("%s: failed to get CS kernel", __func__);
       return;
    }
 
@@ -297,15 +299,15 @@ blorp_copy_memory_to_image_indirect(struct blorp_batch *batch,
    enum isl_format copy_format = get_format_for_copy(fmtl->bpb);
    int dimensions = img_blorp_surf->surf->dim + 1;
 
-   struct blorp_indirect_copy_mem2img_key key = {
-      .base = BLORP_BASE_KEY_INIT(BLORP_SHADER_TYPE_COPY_INDIRECT),
-      .dimensions = dimensions,
-      .forced_layer_or_z = forced_layer_or_z,
-      .format_Bpb = fmtl->bpb / 8,
-      .format_bw = fmtl->bw,
-      .format_bh = fmtl->bh,
-      .format_bd = fmtl->bd,
-   };
+   struct blorp_indirect_copy_mem2img_key key;
+   BLORP_KEY_INIT(key, BLORP_SHADER_TYPE_COPY_INDIRECT,
+                  BLORP_SHADER_PIPELINE_COMPUTE);
+   key.dimensions = dimensions;
+   key.forced_layer_or_z = forced_layer_or_z;
+   key.format_Bpb = fmtl->bpb / 8;
+   key.format_bw = fmtl->bw;
+   key.format_bh = fmtl->bh;
+   key.format_bd = fmtl->bd;
 
    struct blorp_params params;
    blorp_params_init(&params);
@@ -364,8 +366,7 @@ blorp_copy_memory_to_image_indirect(struct blorp_batch *batch,
    }
 
    if (!blorp_get_copy_mem2img_indirect_kernel_cs(batch, &params, &key)) {
-      mesa_loge("failed to get copy_memory_to_image_indirect CS kernel");
-      assert(false);
+      mesa_loge("%s: failed to get CS kernel", __func__);
       return;
    }
 

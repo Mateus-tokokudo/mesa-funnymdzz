@@ -15,6 +15,7 @@
 
 #include "panvk_cmd_precomp.h"
 #include "libpan.h"
+#include "libpan_copy.h"
 #include "libpan_dgc.h"
 
 static bool
@@ -45,6 +46,8 @@ meta_compute_start(struct panvk_cmd_buffer *cmdbuf,
    if (push_set0 && push_set0 == set0) {
       save_ctx->push_set0.desc_count = push_set0->desc_count;
       save_ctx->push_set0.descs_dev_addr = push_set0->descs.dev;
+      save_ctx->push_set0.dirty =
+         BITSET_TEST(cmdbuf->state.compute.desc_state.dirty_push_sets, 0);
       memcpy(save_ctx->push_set0.desc_storage, push_set0->descs.host,
              push_set0->desc_count * PANVK_DESCRIPTOR_SIZE);
    }
@@ -85,6 +88,11 @@ meta_compute_end(struct panvk_cmd_buffer *cmdbuf,
              save_ctx->push_set0.desc_count * PANVK_DESCRIPTOR_SIZE);
       push_set0->descs.dev = save_ctx->push_set0.descs_dev_addr;
       push_set0->desc_count = save_ctx->push_set0.desc_count;
+
+      if (save_ctx->push_set0.dirty)
+         BITSET_SET(cmdbuf->state.compute.desc_state.dirty_push_sets, 0);
+      else
+         BITSET_CLEAR(cmdbuf->state.compute.desc_state.dirty_push_sets, 0);
    }
 
    cmdbuf->state.push_constants = save_ctx->push_constants;
@@ -113,6 +121,8 @@ meta_gfx_start(struct panvk_cmd_buffer *cmdbuf,
    if (push_set0 && push_set0 == set0) {
       save_ctx->push_set0.desc_count = push_set0->desc_count;
       save_ctx->push_set0.descs_dev_addr = push_set0->descs.dev;
+      save_ctx->push_set0.dirty =
+         BITSET_TEST(cmdbuf->state.gfx.desc_state.dirty_push_sets, 0);
       memcpy(save_ctx->push_set0.desc_storage, push_set0->descs.host,
              push_set0->desc_count * PANVK_DESCRIPTOR_SIZE);
    }
@@ -173,6 +183,11 @@ meta_gfx_end(struct panvk_cmd_buffer *cmdbuf,
              save_ctx->push_set0.desc_count * PANVK_DESCRIPTOR_SIZE);
       push_set0->descs.dev = save_ctx->push_set0.descs_dev_addr;
       push_set0->desc_count = save_ctx->push_set0.desc_count;
+
+      if (save_ctx->push_set0.dirty)
+         BITSET_SET(cmdbuf->state.gfx.desc_state.dirty_push_sets, 0);
+      else
+         BITSET_CLEAR(cmdbuf->state.gfx.desc_state.dirty_push_sets, 0);
    }
 
    cmdbuf->state.push_constants = save_ctx->push_constants;
@@ -317,9 +332,15 @@ panvk_per_arch(CmdClearColorImage)(VkCommandBuffer commandBuffer, VkImage image,
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    struct panvk_cmd_meta_graphics_save_ctx save = {0};
 
+   /* Mali cannot render to R64; alias as RG32UI for vk_meta. */
+   VkFormat view_format = img->vk.format;
+   if (img->vk.format == VK_FORMAT_R64_UINT ||
+       img->vk.format == VK_FORMAT_R64_SINT)
+      view_format = VK_FORMAT_R32G32_UINT;
+
    meta_gfx_start(cmdbuf, &save);
    vk_meta_clear_color_image(&cmdbuf->vk, &dev->meta, &img->vk, imageLayout,
-                             img->vk.format, pColor, rangeCount, pRanges);
+                             view_format, pColor, rangeCount, pRanges);
    meta_gfx_end(cmdbuf, &save);
 }
 
@@ -641,77 +662,6 @@ panvk_per_arch(CmdCopyImage2)(VkCommandBuffer commandBuffer,
    }
 }
 
-static bool
-panvk_image_has_afbc(struct panvk_image *img, VkImageSubresourceRange range)
-{
-   VkImageAspectFlags aspect_mask =
-      vk_image_expand_aspect_mask(&img->vk, range.aspectMask);
-   u_foreach_bit(aspect, aspect_mask) {
-      unsigned plane_index = panvk_plane_index(img, 1u << aspect);
-      struct panvk_image_plane *plane = &img->planes[plane_index];
-
-      if (drm_is_afbc(plane->image.props.modifier))
-         return true;
-   }
-
-   return false;
-}
-
-static bool
-panvk_acquire_unmodified(const VkImageMemoryBarrier2 *barrier)
-{
-   if (barrier->srcQueueFamilyIndex != VK_QUEUE_FAMILY_EXTERNAL &&
-       barrier->srcQueueFamilyIndex != VK_QUEUE_FAMILY_FOREIGN_EXT)
-      return false;
-
-   const VkExternalMemoryAcquireUnmodifiedEXT *acquire_unmodified =
-      vk_find_struct_const(barrier->pNext,
-                           EXTERNAL_MEMORY_ACQUIRE_UNMODIFIED_EXT);
-   return acquire_unmodified &&
-          acquire_unmodified->acquireUnmodifiedMemory == VK_TRUE;
-}
-
-/* TODO: pass less data than what's in a VkImageMemoryBarrier2 */
-
-struct panvk_image_layout_transition_handler {
-   void (*cmd)(VkCommandBuffer cmdbuf, const VkImageMemoryBarrier2 *barrier);
-   VkPipelineStageFlags2 stages;
-   VkAccessFlags2 access;
-};
-
-static struct panvk_image_layout_transition_handler
-panvk_get_image_layout_transition_handler(const VkImageMemoryBarrier2 *barrier)
-{
-   if (barrier->oldLayout == barrier->newLayout ||
-       panvk_acquire_unmodified(barrier))
-      return (struct panvk_image_layout_transition_handler){0};
-
-   return (struct panvk_image_layout_transition_handler){0};
-}
-
-void
-panvk_per_arch(transition_image_layout_sync_scope)(
-   const VkImageMemoryBarrier2 *barrier,
-   VkPipelineStageFlags2 *out_stages, VkAccessFlags2 *out_access)
-{
-   struct panvk_image_layout_transition_handler handler =
-      panvk_get_image_layout_transition_handler(barrier);
-
-   *out_stages = handler.stages;
-   *out_access = handler.access;
-}
-
-void
-panvk_per_arch(cmd_transition_image_layout)(
-   VkCommandBuffer cmdbuf, const VkImageMemoryBarrier2 *barrier)
-{
-   struct panvk_image_layout_transition_handler handler =
-      panvk_get_image_layout_transition_handler(barrier);
-
-   if (handler.cmd)
-      handler.cmd(cmdbuf, barrier);
-}
-
 void
 panvk_per_arch(cmd_meta_resolve_attachments)(struct panvk_cmd_buffer *cmdbuf)
 {
@@ -829,3 +779,76 @@ panvk_per_arch(cmd_meta_resolve_attachments)(struct panvk_cmd_buffer *cmdbuf)
    vk_meta_resolve_rendering(&cmdbuf->vk, &dev->meta, &render_info);
    meta_gfx_end(cmdbuf, &save);
 }
+
+#if PAN_ARCH >= 10
+
+#define COPY_MEM_INDIRECT_MAX_WG 16
+#define COPY_MEM_INDIRECT_WG_BYTES                                            \
+   (PANLIB_COPY_MEM_INDIRECT_WG_SIZE * PANLIB_COPY_MEM_INDIRECT_CHUNK_SIZE)
+
+/* Turn the 64-bit byte size at size_addr into a workgroup count in
+ * JOB_SIZE_X, capped at COPY_MEM_INDIRECT_MAX_WG. Pre-v13 archs have no CS
+ * shift instructions, so the count is only approximated with
+ * min(size, cap). The result is never too small, the kernel loops when the
+ * dispatch does not cover the whole size.
+ */
+static void
+emit_copy_mem_indirect_wg_count(struct panvk_cmd_buffer *cmdbuf,
+                                uint64_t size_addr)
+{
+   struct cs_builder *b = panvk_get_cs_builder(cmdbuf, PANVK_SUBQUEUE_COMPUTE);
+
+   cs_update_compute_ctx(b) {
+      cs_move64_to(b, cs_scratch_reg64(b, 0), size_addr);
+      cs_load_to(b, cs_scratch_reg_tuple(b, 2, 2), cs_scratch_reg64(b, 0),
+                 BITFIELD_MASK(2), 0);
+      cs_flush_loads(b);
+#if PAN_ARCH >= 13
+      /* wg_count = DIV_ROUND_UP(size, COPY_MEM_INDIRECT_WG_BYTES) */
+      cs_add_imm64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 2),
+                   COPY_MEM_INDIRECT_WG_BYTES - 1);
+      cs_rshift_imm_u64(b, cs_scratch_reg64(b, 2), cs_scratch_reg64(b, 2),
+                        util_logbase2(COPY_MEM_INDIRECT_WG_BYTES));
+#endif
+      cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_X),
+                   COPY_MEM_INDIRECT_MAX_WG);
+      cs_umin32(b, cs_scratch_reg32(b, 2), cs_scratch_reg32(b, 2),
+                cs_sr_reg32(b, COMPUTE, JOB_SIZE_X));
+      /* Keep the cap if the size exceeds 32 bits. */
+      cs_if(b, MALI_CS_CONDITION_EQUAL, cs_scratch_reg32(b, 3)) {
+         cs_move_reg32(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_X),
+                       cs_scratch_reg32(b, 2));
+      }
+      cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_Y), 1);
+      cs_move32_to(b, cs_sr_reg32(b, COMPUTE, JOB_SIZE_Z), 1);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(CmdCopyMemoryIndirectKHR)(
+   VkCommandBuffer commandBuffer,
+   const VkCopyMemoryIndirectInfoKHR *pCopyMemoryIndirectInfo)
+{
+   VK_FROM_HANDLE(panvk_cmd_buffer, cmdbuf, commandBuffer);
+   struct panvk_precomp_ctx ctx = panvk_per_arch(precomp_cs)(cmdbuf);
+
+   for (uint32_t i = 0; i < pCopyMemoryIndirectInfo->copyCount; i++) {
+      uint64_t cmd_addr = pCopyMemoryIndirectInfo->copyAddressRange.address +
+                          i * pCopyMemoryIndirectInfo->copyAddressRange.stride;
+
+      emit_copy_mem_indirect_wg_count(
+         cmdbuf, cmd_addr + offsetof(VkCopyMemoryIndirectCommandKHR, size));
+      panlib_copy_mem_indirect(&ctx, panlib_dynamic_csf(),
+                               PANLIB_BARRIER_CSF_SYNC, cmd_addr);
+   }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+panvk_per_arch(CmdCopyMemoryToImageIndirectKHR)(
+   VkCommandBuffer commandBuffer,
+   const VkCopyMemoryToImageIndirectInfoKHR *pCopyMemoryToImageIndirectInfo)
+{
+   assert(!"indirectMemoryToImageCopy is not supported");
+}
+
+#endif /* PAN_ARCH >= 10 */

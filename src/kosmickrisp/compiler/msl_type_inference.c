@@ -23,6 +23,7 @@ typedef enum ti_type {
    TYPE_BOOL,
    TYPE_FLOAT,
    TYPE_SAMPLER,
+   TYPE_TEXTURE,
 } ti_type;
 
 static ti_type
@@ -382,6 +383,7 @@ infer_types_from_intrinsic(struct hash_table *types, nir_intrinsic_instr *instr)
    // but their sources are pointers (i.e. uints).
    case nir_intrinsic_load_texture_handle_kk:
    case nir_intrinsic_load_depth_texture_kk:
+      set_type(types, &instr->def, TYPE_TEXTURE);
       set_type(types, &instr->src[0], TYPE_UINT);
       break;
    case nir_intrinsic_load_sampler_handle_kk:
@@ -422,6 +424,9 @@ infer_types_from_intrinsic(struct hash_table *types, nir_intrinsic_instr *instr)
                ti_type_from_nir(nir_intrinsic_dest_type(instr)));
       set_type(types, &instr->src[1], TYPE_UINT); // coords
       set_type(types, &instr->src[3], TYPE_UINT); // level
+      break;
+   case nir_intrinsic_bindless_image_levels:
+      set_type(types, &instr->def, TYPE_UINT);
       break;
    case nir_intrinsic_bindless_image_store:
       set_type(types, &instr->src[1], TYPE_UINT); // coords
@@ -644,6 +649,8 @@ static const char *uint64_names[] = {"ulong", "ulong2", "ulong3", "ulong4"};
 static const char *
 ti_type_to_msl_type(ti_type type, uint8_t bit_width, uint8_t num_components)
 {
+   assert(type != TYPE_TEXTURE && "texture MSL type requires context");
+
    switch (type) {
    case TYPE_GENERIC_DATA:
    case TYPE_GENERIC_INT:
@@ -796,6 +803,9 @@ emit_src_component(struct nir_to_msl_ctx *ctx, nir_src *src, unsigned comp)
    case TYPE_GENERIC_INT:
    case TYPE_GENERIC_INT_OR_BOOL:
       switch (src->ssa->bit_size) {
+      case 1:
+         P(ctx, "bool(");
+         break;
       case 8:
          P(ctx, "uchar(");
          break;
@@ -879,4 +889,10 @@ bool
 msl_def_is_sampler(struct nir_to_msl_ctx *ctx, nir_def *def)
 {
    return get_type(ctx->types, def) == TYPE_SAMPLER;
+}
+
+bool
+msl_def_is_texture(struct nir_to_msl_ctx *ctx, nir_def *def)
+{
+   return get_type(ctx->types, def) == TYPE_TEXTURE;
 }

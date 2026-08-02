@@ -1,4 +1,5 @@
 // Copyright 2020 Red Hat.
+// Copyright 2026 NXP
 // SPDX-License-Identifier: MIT
 
 use crate::api::icd::*;
@@ -31,6 +32,7 @@ use std::convert::TryInto;
 use std::env;
 use std::ffi::CStr;
 use std::fmt::Debug;
+use std::mem::size_of;
 use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::os::raw::*;
@@ -253,6 +255,11 @@ impl HelperContextWrapper for HelperContext<'_> {
 }
 
 impl_cl_type_trait_base!(cl_device_id, Device, [Device], CL_INVALID_DEVICE);
+
+pub enum DeviceFillBuffer {
+    Clear(Vec<u8>),
+    Meta(Vec<u8>),
+}
 
 impl DeviceBase {
     fn fill_format_tables(&mut self) {
@@ -1406,12 +1413,68 @@ impl DeviceBase {
             float_controls: spirv_float_controls,
         }
     }
+
+    pub fn optimize_buffer_fill(
+        &self,
+        pattern: &[u8],
+        address: usize,
+        len: usize,
+    ) -> DeviceFillBuffer {
+        debug_assert!(pattern.len().is_power_of_two());
+        debug_assert!(pattern.len() <= 128);
+
+        // somehow ilog2 panics on this value, due to a negative input?!?
+        let pattern_len = pattern.len() as u32;
+        let hw_clear_buffer_sizes = u32::from(self.screen().caps().hw_clear_buffer_sizes);
+        let min_input_pot = pattern.len().trailing_zeros();
+
+        // Fast path
+        if pattern_len & hw_clear_buffer_sizes != 0 {
+            return DeviceFillBuffer::Clear(pattern.to_vec());
+        }
+
+        // We do not support bigger than 64/128 byte fills.
+        let max_pot = if self.int64_supported() { 7 } else { 6 };
+        let max_input_pot = address
+            .trailing_zeros()
+            .min(len.trailing_zeros())
+            .min(max_pot);
+
+        let mut size_pot = max_input_pot;
+        for new_size_pot in (min_input_pot..=max_input_pot).rev() {
+            if (1 << new_size_pot) & hw_clear_buffer_sizes != 0 {
+                size_pot = new_size_pot;
+                break;
+            }
+        }
+
+        let size = 1u32 << size_pot;
+        // Replicate the pattern to the new size
+        let pattern = pattern
+            .iter()
+            .copied()
+            .cycle()
+            .take(size as usize)
+            .collect();
+
+        if size & hw_clear_buffer_sizes != 0 {
+            DeviceFillBuffer::Clear(pattern)
+        } else {
+            DeviceFillBuffer::Meta(pattern)
+        }
+    }
 }
 
 impl Device {
     pub fn mem_base_addr_align_bytes(&self) -> usize {
-        // TODO: proper retrieval from the underlying device/screen
-        0x200
+        // CL spec: the minimum value is the size of the largest OpenCL built-in data type
+        // supported by the device (long16 in FULL profile, long16 or int16 in EMBEDDED profile).
+        // Sub-buffers are simply offsets internally, so no additional hardware alignment is needed.
+        if self.int64_supported() {
+            size_of::<[u64; 16]>()
+        } else {
+            size_of::<[u32; 16]>()
+        }
     }
 
     pub fn mem_base_addr_align_bits(&self) -> u32 {

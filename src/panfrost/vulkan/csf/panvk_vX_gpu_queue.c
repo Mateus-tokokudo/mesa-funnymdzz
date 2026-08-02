@@ -1029,6 +1029,9 @@ finish_render_desc_ringbuf(struct panvk_gpu_queue *queue)
    } else
 #endif
    if (ringbuf->addr.dev) {
+      panvk_address_binding_report(dev, NULL, ringbuf->addr.dev, ringbuf->size,
+                                   VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT);
+
       struct pan_kmod_vm_op op = {
          .type = PAN_KMOD_VM_OP_TYPE_UNMAP,
          .va = {
@@ -1177,6 +1180,8 @@ init_render_desc_ringbuf(struct panvk_gpu_queue *queue)
 #ifdef HAVE_PAN_KMOD_KBASE
 ringbuf_mapped:
 #endif
+   panvk_address_binding_report(dev, NULL, ringbuf->addr.dev, ringbuf->size,
+                                VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
    if (dev->debug.decode_ctx) {
       pandecode_inject_mmap(dev->debug.decode_ctx, ringbuf->addr.dev,
                             ringbuf->addr.host, ringbuf->size, NULL);
@@ -1219,6 +1224,10 @@ finish_subqueue_tracing(struct panvk_gpu_queue *queue,
 
    if (subq->tracebuf.addr.dev) {
       uint64_t pgsize = panvk_get_gpu_page_size(dev);
+
+      panvk_address_binding_report(dev, NULL, subq->tracebuf.addr.dev,
+                                   subq->tracebuf.size,
+                                   VK_DEVICE_ADDRESS_BINDING_TYPE_UNBIND_EXT);
 
       pandecode_inject_free(dev->debug.decode_ctx, subq->tracebuf.addr.dev,
                             subq->tracebuf.size);
@@ -1363,6 +1372,10 @@ init_subqueue_tracing(struct panvk_gpu_queue *queue,
    }
 
    subq->tracebuf.addr.dev = dev_addr;
+
+   panvk_address_binding_report(dev, NULL, subq->tracebuf.addr.dev,
+                                subq->tracebuf.size,
+                                VK_DEVICE_ADDRESS_BINDING_TYPE_BIND_EXT);
 
    if (dev->debug.decode_ctx) {
       pandecode_inject_mmap(dev->debug.decode_ctx, subq->tracebuf.addr.dev,
@@ -2849,6 +2862,11 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
 
    if (vk_queue_is_lost(vk_queue))
       return VK_ERROR_DEVICE_LOST;
+
+   if (vk_queue_submit_has_bind(vk_submit)) {
+      struct panvk_gpu_queue *queue = container_of(vk_queue, struct panvk_gpu_queue, vk);
+      return panvk_queue_vm_bind(vk_queue, vk_submit, queue->syncobj_handle);
+   }
 
    panvk_queue_submit_init(&submit, vk_queue);
    panvk_queue_submit_init_storage(&submit, vk_submit, &stack_storage);

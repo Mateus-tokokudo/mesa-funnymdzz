@@ -1217,9 +1217,9 @@ update_obj_info(struct zink_screen *screen, struct zink_resource_object *obj,
       obj->size = zink_bo_get_size(obj->bo);
    }
 
-   obj->coherent = screen->info.mem_props.memoryTypes[obj->bo->base.base.placement].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+   obj->coherent = screen->info.mem_props.memoryTypes[obj->bo->base.placement].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
    if (!(templ->flags & PIPE_RESOURCE_FLAG_SPARSE)) {
-      obj->host_visible = screen->info.mem_props.memoryTypes[obj->bo->base.base.placement].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+      obj->host_visible = screen->info.mem_props.memoryTypes[obj->bo->base.placement].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
    }
 }
 
@@ -1887,7 +1887,7 @@ resource_create(struct pipe_screen *pscreen,
           */
          res->base.b.flags |= PIPE_RESOURCE_FLAG_DONT_MAP_DIRECTLY;
       }
-      if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB)
+      if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB || screen->info.have_KHR_device_address_commands)
          zink_resource_get_address(screen, res);
    } else {
       if (templ->flags & PIPE_RESOURCE_FLAG_SPARSE)
@@ -2260,10 +2260,7 @@ zink_resource_get_handle(struct pipe_screen *pscreen,
          int fd;
          fd_info.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
          fd_info.memory = zink_bo_get_mem(obj->bo);
-         if (whandle->type == WINSYS_HANDLE_TYPE_FD)
-            fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-         else
-            fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+         fd_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
          VkResult result = VKSCR(GetMemoryFdKHR)(screen->dev, &fd_info, &fd);
          if (result != VK_SUCCESS) {
             mesa_loge("ZINK: vkGetMemoryFdKHR failed");
@@ -2677,19 +2674,13 @@ zink_buffer_map(struct pipe_context *pctx,
    }
 
    unsigned map_offset = box->x;
-   /* ideally never ever read or write to non-cached mem */
-   bool is_cached_mem = (screen->info.mem_props.memoryTypes[res->obj->bo->base.base.placement].propertyFlags & VK_STAGING_RAM) == VK_STAGING_RAM;
-   /* but this is only viable with a certain amount of vram since it may fully duplicate lots of large buffers */
-   bool host_mem_type_check = res->obj->host_visible;
-   if (screen->always_cached_upload)
-      host_mem_type_check &= is_cached_mem;
-   if (usage & PIPE_MAP_DISCARD_RANGE && !(usage & PIPE_MAP_PERSISTENT) &&
-       (!host_mem_type_check || !(usage & (PIPE_MAP_UNSYNCHRONIZED)))) {
-
+   if (usage & PIPE_MAP_DISCARD_RANGE &&
+        (!res->obj->host_visible ||
+        !(usage & (PIPE_MAP_UNSYNCHRONIZED | PIPE_MAP_PERSISTENT)))) {
       /* Check if mapping this buffer would cause waiting for the GPU.
        */
 
-      if (!host_mem_type_check || force_discard_range ||
+      if (!res->obj->host_visible || force_discard_range ||
           !zink_resource_usage_check_completion(screen, res, ZINK_RESOURCE_ACCESS_RW)) {
          /* Do a wait-free write-only transfer using a temporary buffer. */
          unsigned offset;
@@ -2730,7 +2721,9 @@ zink_buffer_map(struct pipe_context *pctx,
       if (!zink_resource_usage_check_completion(screen, res, ZINK_RESOURCE_ACCESS_WRITE))
          goto success;
       usage |= PIPE_MAP_UNSYNCHRONIZED;
-   } else if ((usage & PIPE_MAP_READ) && !(usage & PIPE_MAP_PERSISTENT) && !host_mem_type_check) {
+   } else if (((usage & PIPE_MAP_READ) && !(usage & PIPE_MAP_PERSISTENT) &&
+               ((screen->info.mem_props.memoryTypes[res->obj->bo->base.placement].propertyFlags & VK_STAGING_RAM) != VK_STAGING_RAM)) ||
+              !res->obj->host_visible) {
       /* any read, non-HV write, or unmappable that reaches this point needs staging */
       if ((usage & PIPE_MAP_READ) || !res->obj->host_visible || res->base.b.flags & PIPE_RESOURCE_FLAG_DONT_MAP_DIRECTLY) {
 overwrite:
@@ -3052,6 +3045,8 @@ zink_image_subdata(struct pipe_context *pctx,
    /* fallback case for per-resource unsupported or device-level unsupported */
    u_default_texture_subdata(pctx, pres, level, usage, box, data, stride, layer_stride);
    res->subdata = false;
+   if (res->fb_bind_count)
+      ctx->rp_tc_info_updated = true;
 }
 
 static void
@@ -3507,7 +3502,11 @@ zink_resource_setup_transfer_layouts(struct zink_context *ctx, struct zink_resou
        */
       screen->image_barrier(ctx, src,
                             VK_IMAGE_LAYOUT_GENERAL,
-                            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_ACCESS_TRANSFER_READ_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT);
+      screen->image_barrier(ctx, src,
+                            VK_IMAGE_LAYOUT_GENERAL,
+                            VK_ACCESS_TRANSFER_WRITE_BIT,
                             VK_PIPELINE_STAGE_TRANSFER_BIT);
    } else {
       screen->image_barrier(ctx, src,

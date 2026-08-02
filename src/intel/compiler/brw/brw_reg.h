@@ -11,9 +11,6 @@
  * This file defines struct brw_reg, which is our representation for EU
  * registers.  They're not a hardware specific format, just an abstraction
  * that intends to capture the full flexibility of the hardware registers.
- *
- * The brw_eu_emit.c layer's brw_set_dest/brw_set_src[01] functions encode
- * the abstract brw_reg type into the actual hardware instruction encoding.
  */
 
 #pragma once
@@ -203,6 +200,17 @@ typedef struct brw_reg {
 
    bool equals(const brw_reg &r) const;
    bool negative_equals(const brw_reg &r) const;
+
+   brw_reg without_src_mods() const
+   {
+      brw_reg r = *this;
+
+      r.negate = false;
+      r.abs = false;
+
+      return r;
+   }
+
    bool is_contiguous() const;
 
    bool is_zero() const;
@@ -233,6 +241,9 @@ typedef struct brw_reg {
    unsigned component_size(unsigned width) const;
 #endif /* __cplusplus */
 } brw_reg;
+
+uint32_t
+brw_register_file_size(const struct intel_device_info *devinfo);
 
 static inline unsigned
 phys_file(const struct brw_reg reg)

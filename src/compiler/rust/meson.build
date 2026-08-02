@@ -7,11 +7,14 @@ _compiler_rs_sources = [
   'cfg.rs',
   'dataflow.rs',
   'depth_first_search.rs',
+  'enum_as_u8.rs',
   'float16.rs',
+  'lower_bounded.rs',
   'memstream.rs',
   'nir_instr_printer.rs',
   'nir.rs',
   'smallvec.rs',
+  'union_find.rs',
   'vec_pair.rs',
 ]
 
@@ -29,6 +32,7 @@ _compiler_binding_types = [
   'gl_tess_spacing',
   'gl_varying_slot',
   'gl_vert_attrib',
+  'glsl_sampler_dim',
   'glsl_type',
   'glsl_matrix_layout',
   'nir_.*',
@@ -38,6 +42,7 @@ _compiler_binding_types = [
   'shader_info',
   'tess_primitive_mode',
   'u_printf_info',
+  'util_dynarray',
 ]
 
 _compiler_rust_args = [
@@ -70,9 +75,11 @@ _compiler_bindgen_args = [
   '--allowlist-function', 'nir_.*',
   '--allowlist-function', 'compiler_rs.*',
   '--allowlist-function', 'u_memstream.*',
+  '--allowlist-function', 'util_dynarray.*',
   '--allowlist-type', 'u_memstream',
   '--no-prepend-enum-name',
   '--with-derive-default',
+  '--wrap-static-fns-suffix', '_compiler_rs_extern'
 ]
 
 foreach type : _compiler_binding_types
@@ -112,6 +119,9 @@ _libcompiler_bindings = static_library(
   'compiler_bindings',
   ['bindings.h', _compiler_bindings_rs[1]],
   gnu_symbol_visibility : 'hidden',
+  include_directories : [
+    fs.relative_to(meson.project_build_root(), meson.current_source_dir()),
+  ],
   c_args : [
     pre_args,
     cc.get_supported_arguments('-Wno-missing-prototypes'),
@@ -163,6 +173,18 @@ if with_tests and get_option('b_sanitize') == 'none'
     ],
   )
 endif
+
+_libacorn_rs = static_library(
+  'acorn',
+  files('acorn/lib.rs'),
+  gnu_symbol_visibility : 'hidden',
+  rust_abi : 'rust',
+  rust_args : _compiler_rust_args,
+)
+
+idep_acorn_rs = declare_dependency(
+  link_with : _libacorn_rs,
+)
 
 idep_compiler_rs = declare_dependency(
   link_with : _libcompiler_rs,

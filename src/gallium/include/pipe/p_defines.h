@@ -436,10 +436,9 @@ enum pipe_flush_flags
 #define PIPE_BARRIER_IMAGE             (1 << 8)
 #define PIPE_BARRIER_FRAMEBUFFER       (1 << 9)
 #define PIPE_BARRIER_STREAMOUT_BUFFER  (1 << 10)
-#define PIPE_BARRIER_GLOBAL_BUFFER     (1 << 11)
-#define PIPE_BARRIER_UPDATE_BUFFER     (1 << 12)
-#define PIPE_BARRIER_UPDATE_TEXTURE    (1 << 13)
-#define PIPE_BARRIER_ALL               ((1 << 14) - 1)
+#define PIPE_BARRIER_UPDATE_BUFFER     (1 << 11)
+#define PIPE_BARRIER_UPDATE_TEXTURE    (1 << 12)
+#define PIPE_BARRIER_ALL               ((1 << 13) - 1)
 
 #define PIPE_BARRIER_UPDATE \
    (PIPE_BARRIER_UPDATE_BUFFER | PIPE_BARRIER_UPDATE_TEXTURE)
@@ -745,6 +744,14 @@ enum pipe_quirk_texture_border_color_swizzle {
    PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_ALPHA_NOT_W = (1 << 3),
 };
 
+enum pipe_device_type
+{
+   PIPE_DEVICE_TYPE_UNKNOWN,
+   PIPE_DEVICE_TYPE_INTEGRATED_GPU,
+   PIPE_DEVICE_TYPE_DISCRETE_GPU,
+   PIPE_DEVICE_TYPE_CPU,
+};
+
 enum pipe_endian
 {
    PIPE_ENDIAN_LITTLE = 0,
@@ -927,6 +934,7 @@ struct pipe_caps {
    bool texture_float_linear;
    bool texture_half_float_linear;
    bool depth_bounds_test;
+   bool native_fp32_depth;
    bool texture_query_samples;
    bool force_persample_interp;
    bool shareable_shaders;
@@ -1154,6 +1162,10 @@ struct pipe_caps {
    uint64_t min_vma;
    uint64_t max_vma;
 
+   /** Which POT pattern sizes are accelerated? This is a bitmask of sizes */
+   uint16_t hw_clear_buffer_sizes;
+
+   enum pipe_device_type device_type;
    enum pipe_vertex_input_alignment vertex_input_alignment;
    enum pipe_endian endianness;
    enum pipe_point_size_lower_mode point_size_fixed;

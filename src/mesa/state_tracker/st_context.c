@@ -1,6 +1,7 @@
 /**************************************************************************
  *
  * Copyright 2007 VMware, Inc.
+ * Copyright 2026 NXP
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -344,6 +345,7 @@ st_context_free_zombie_objects(struct st_context *st)
 static void
 st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
 {
+   cso_unbind_context(st->cso_context);
    st_destroy_draw(st);
    st_destroy_clear(st);
    st_destroy_bitmap(st);
@@ -414,8 +416,14 @@ st_init_driver_flags(struct st_context *st)
 
    ST_SET_STATE(f->NewClipPlaneEnable, ST_NEW_RASTERIZER);
    if (!st->screen->caps.clip_planes) {
-      ST_SET_STATE3(f->NewClipPlaneEnable, ST_NEW_VS_STATE, ST_NEW_GS_STATE,
-                    ST_NEW_TES_STATE);
+      ST_SET_STATE2(f->NewClipPlaneEnable, ST_NEW_VS_STATE,
+                    ST_NEW_VS_CONSTANTS);
+      if (_mesa_has_geometry_shaders(st->ctx))
+         ST_SET_STATE2(f->NewClipPlaneEnable,
+                    ST_NEW_GS_STATE, ST_NEW_GS_CONSTANTS);
+      if (_mesa_has_tessellation(st->ctx))
+         ST_SET_STATE2(f->NewClipPlaneEnable,
+                    ST_NEW_TES_STATE, ST_NEW_TES_CONSTANTS);
    }
 
    if (!st->screen->caps.gl_clamp) {
@@ -922,6 +930,7 @@ st_destroy_context(struct st_context *st)
    st_release_program(st, &st->mp);
 
    if (st->hw_select_shaders) {
+      st->pipe->bind_gs_state(st->pipe, NULL);
       hash_table_foreach(st->hw_select_shaders, entry)
          st->pipe->delete_gs_state(st->pipe, entry->data);
       _mesa_hash_table_destroy(st->hw_select_shaders, NULL);

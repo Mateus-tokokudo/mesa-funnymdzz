@@ -28,6 +28,28 @@ nir_src_float_cvt_bits(nir_src *use, bool *is_mp)
 }
 
 static bool
+uses_are_all_cvt(nir_def *def, unsigned converted_bit_size, bool *is_mp)
+{
+   nir_foreach_use_including_if(src, def) {
+      if (nir_src_is_if(src) ||
+          nir_src_float_cvt_bits(src, is_mp) != converted_bit_size)
+         return false;
+   }
+   return true;
+}
+
+/* nir_opt_algebraic folds f2f16 a@16 and f2f32 a@32 for us, but not f2fmp, so
+ * reinsert an explicit up-convert after a mediump load.
+ */
+static void
+reinsert_mp_cvt(nir_builder *b, nir_instr *instr, nir_def *def)
+{
+   b->cursor = nir_after_instr(instr);
+   nir_def *up_cvt = nir_f2f32(b, def);
+   nir_def_rewrite_uses_after(def, up_cvt);
+}
+
+static bool
 op_supports_cvt_fusion(nir_intrinsic_instr *instr, uint64_t gpu_id)
 {
    /* We might also convert LD_CVT but I haven't seen any case where it's
@@ -53,14 +75,13 @@ op_supports_cvt_fusion(nir_intrinsic_instr *instr, uint64_t gpu_id)
 
 struct fuse_ctx {
    uint64_t gpu_id;
-   struct pan_varying_layout *layout;
+   const struct pan_varying_layout *layout;
 };
 
 static bool
-fuse_io_instr(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
+fuse_io_instr(struct nir_builder *b, nir_intrinsic_instr *intr,
+              const struct fuse_ctx *ctx)
 {
-   const struct fuse_ctx *ctx = data;
-
    if (!op_supports_cvt_fusion(intr, ctx->gpu_id))
       return false;
 
@@ -69,12 +90,8 @@ fuse_io_instr(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
    unsigned converted_bit_size = orig_bit_size == 32 ? 16 : 32;
    bool is_mp = false;
 
-   /* Check if all usages are conversions */
-   nir_foreach_use_including_if(src, &intr->def) {
-      if (nir_src_is_if(src) ||
-          nir_src_float_cvt_bits(src, &is_mp) != converted_bit_size)
-         return false;
-   }
+   if (!uses_are_all_cvt(&intr->def, converted_bit_size, &is_mp))
+      return false;
 
    /* If they are, the load is always followed by conversion and we thus can
     * fuse the cvt into the load.
@@ -102,26 +119,58 @@ fuse_io_instr(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
       }
    }
 
-   /* We don't remove conversions, nir_opt_algebraic will fold f2f16 a@16
-    * and f2f32 a@32 automatically, everything but f2fmp of course.
-    */
-   if (is_mp) {
-      b->cursor = nir_after_instr(&intr->instr);
-      nir_def *up_cvt = nir_f2f32(b, &intr->def);
-      nir_def_rewrite_uses_after(&intr->def, up_cvt);
-   }
+   if (is_mp)
+      reinsert_mp_cvt(b, &intr->instr, &intr->def);
 
    return true;
 }
 
+static bool
+fuse_tex_instr(struct nir_builder *b, nir_tex_instr *tex)
+{
+   if (nir_alu_type_get_base_type(tex->dest_type) != nir_type_float)
+      return false;
+
+   unsigned orig_bit_size = tex->def.bit_size;
+   assert(orig_bit_size == 32 || orig_bit_size == 16);
+   unsigned converted_bit_size = orig_bit_size == 32 ? 16 : 32;
+   bool is_mp = false;
+
+   if (!uses_are_all_cvt(&tex->def, converted_bit_size, &is_mp))
+      return false;
+
+   tex->def.bit_size = converted_bit_size;
+   tex->dest_type = nir_type_float | converted_bit_size;
+
+   if (is_mp)
+      reinsert_mp_cvt(b, &tex->instr, &tex->def);
+
+   return true;
+}
+
+static bool
+fuse_instr(struct nir_builder *b, nir_instr *instr, void *data)
+{
+   const struct fuse_ctx *ctx = data;
+
+   switch (instr->type) {
+   case nir_instr_type_intrinsic:
+      return fuse_io_instr(b, nir_instr_as_intrinsic(instr), ctx);
+   case nir_instr_type_tex:
+      return fuse_tex_instr(b, nir_instr_as_tex(instr));
+   default:
+      return false;
+   }
+}
+
 bool
 pan_nir_fuse_io_cvt(nir_shader *nir, uint64_t gpu_id,
-                    struct pan_varying_layout *layout)
+                    const struct pan_varying_layout *layout)
 {
    struct fuse_ctx ctx = {
       .gpu_id = gpu_id,
       .layout = layout,
    };
-   return nir_shader_intrinsics_pass(nir, fuse_io_instr,
-                                     nir_metadata_control_flow, (void *)&ctx);
+   return nir_shader_instructions_pass(nir, fuse_instr,
+                                       nir_metadata_control_flow, (void *)&ctx);
 }

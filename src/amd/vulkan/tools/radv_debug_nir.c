@@ -232,14 +232,15 @@ radv_build_printf(nir_builder *b, nir_def *cond, const char *format_string, ...)
 }
 
 void
-radv_dump_printf_data(struct radv_device *device, FILE *out)
+radv_dump_printf_data(struct radv_device *device, FILE *out, bool wait_idle)
 {
    struct radv_printf_data *printf = &device->debug_nir.printf;
 
    if (!printf->buffer.map)
       return;
 
-   device->vk.dispatch_table.DeviceWaitIdle(radv_device_to_handle(device));
+   if (wait_idle)
+      device->vk.dispatch_table.DeviceWaitIdle(radv_device_to_handle(device));
 
    struct radv_printf_buffer_header *header = printf->buffer.map;
    uint8_t *data = printf->buffer.map;

@@ -28,6 +28,9 @@
 #include "util/u_blitter.h"
 #include "util/u_printf.h"
 
+#include "util/perf/u_trace.h"
+#include "panfrost_perfetto.h"
+
 #include "compiler/shader_enums.h"
 #include "midgard/midgard_compile.h"
 
@@ -38,6 +41,15 @@
       lval |= (bit);                                                           \
    else                                                                        \
       lval &= ~(bit);
+
+/* Passed as the 'cs' argument to u_trace tracepoints, analogous to
+ * panvk_utrace_cs_info. sb_wait_mask != 0 makes the GPU defer the timestamp
+ * write until those scoreboard slots signal (CSF only, JM ignores it).
+ */
+struct panfrost_trace_cs_info {
+   struct panfrost_batch *batch;
+   uint16_t sb_wait_mask;
+};
 
 /* Dirty tracking flags. 3D is for general 3D state. Shader flags are
  * per-stage. Renderer refers to Renderer State Descriptors. Vertex refers to
@@ -192,6 +204,7 @@ struct panfrost_context {
    } texture_buffer[MESA_SHADER_STAGES];
 
    struct blitter_context *blitter;
+   bool has_blit_loop;
 
    struct pan_mod_convert_shaders mod_convert_shaders;
 
@@ -232,6 +245,13 @@ struct panfrost_context {
       struct u_printf_ctx ctx;
       struct panfrost_bo *bo;
    } printf;
+
+   /* u_trace support */
+   struct u_trace_context trace_context;
+#ifdef HAVE_PERFETTO
+   struct panfrost_perfetto_state perfetto;
+#endif
+   uint32_t submit_count; /* monotonic submit ID for perfetto */
 };
 
 /* Corresponds to the CSO */
@@ -445,6 +465,27 @@ struct panfrost_shader_binary {
    struct util_dynarray binary;
 };
 
+struct panfrost_run_fullscreen_attrib {
+   float x, y, z, w;
+};
+
+/* The tiler always allocates packets that can hold 64 vertices in RUN_IDVS
+ * malloc mode. For RUN_FULLSCREEN, the vertex array is preallocated but must
+ * match the tiler allocation strategy. */
+#define PAN_RUN_FULLSCREEN_NUM_VERTICES 64
+
+#define PAN_RUN_FULLSCREEN_ATTRIB_STRIDE \
+   sizeof(struct panfrost_run_fullscreen_attrib)
+
+/* A RUN_FULLSCREEN packet is made of a position and a texcoord attrib. */
+#define PAN_RUN_FULLSCREEN_PACKET_STRIDE \
+   (2 * sizeof(struct panfrost_run_fullscreen_attrib))
+
+#define PAN_RUN_FULLSCREEN_ARRAY_SIZE \
+   (PAN_RUN_FULLSCREEN_NUM_VERTICES * PAN_RUN_FULLSCREEN_PACKET_STRIDE)
+
+#define PAN_RUN_FULLSCREEN_ARRAY_ALIGN 64
+
 void
 panfrost_disk_cache_store(struct disk_cache *cache,
                           const struct panfrost_uncompiled_shader *uncompiled,
@@ -480,6 +521,10 @@ struct pan_vertex_buffer {
 unsigned pan_assign_vertex_buffer(struct pan_vertex_buffer *buffers,
                                   unsigned *nr_bufs, unsigned vbi,
                                   unsigned divisor);
+
+struct pan_ptr panfrost_emit_fullscreen_vertex_array(struct panfrost_batch *batch,
+                                                     enum blitter_attrib_type type,
+                                                     const struct blitter_attrib *attrib);
 
 struct panfrost_zsa_state;
 struct panfrost_sampler_state;
@@ -537,20 +582,20 @@ void panfrost_shader_context_init(struct pipe_context *pctx);
 static inline void
 panfrost_dirty_state_all(struct panfrost_context *ctx)
 {
-   ctx->dirty = ~0;
+   ctx->dirty = (enum pan_dirty_3d)~0;
 
    for (unsigned i = 0; i < MESA_SHADER_STAGES; ++i)
-      ctx->dirty_shader[i] = ~0;
+      ctx->dirty_shader[i] = (enum pan_dirty_shader)~0;
 }
 
 static inline void
 panfrost_clean_state_3d(struct panfrost_context *ctx)
 {
-   ctx->dirty = 0;
+   ctx->dirty = (enum pan_dirty_3d)0;
 
    for (unsigned i = 0; i < MESA_SHADER_STAGES; ++i) {
       if (i != MESA_SHADER_COMPUTE)
-         ctx->dirty_shader[i] = 0;
+         ctx->dirty_shader[i] = (enum pan_dirty_shader)0;
    }
 }
 

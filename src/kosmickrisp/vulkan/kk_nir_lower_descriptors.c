@@ -459,6 +459,7 @@ try_lower_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    case nir_intrinsic_image_deref_size:
    case nir_intrinsic_image_deref_samples:
    case nir_intrinsic_image_deref_store_block_agx:
+   case nir_intrinsic_image_deref_levels:
       return lower_image_intrin(b, intrin, ctx);
 
    default:
@@ -518,17 +519,17 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    //    return true;
    // }
 
-   // if (tex->op == nir_texop_has_custom_border_color_agx) {
-   //    unsigned offs = offsetof(struct kk_sampled_image_descriptor,
-   //                             clamp_0_sampler_index_or_negative);
+   if (tex->op == nir_texop_has_custom_border_color_agx) {
+      unsigned offs = offsetof(struct kk_sampled_image_descriptor,
+                               clamp_0_sampler_index_or_negative);
 
-   //    nir_def *res = load_resource_deref_desc(
-   //       b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)),
-   //       plane_offset_B + offs, ctx);
+      nir_def *res = load_resource_deref_desc(
+         b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)),
+         plane_offset_B + offs, ctx);
 
-   //    nir_def_replace(&tex->def, nir_ige_imm(b, res, 0));
-   //    return true;
-   // }
+      nir_def_replace(&tex->def, nir_ige_imm(b, res, 0));
+      return true;
+   }
 
    if (tex->op == nir_texop_custom_border_color_agx) {
       unsigned offs = offsetof(struct kk_sampled_image_descriptor, border);
@@ -568,6 +569,11 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
    if (sampler != NULL) {
       unsigned offs =
          offsetof(struct kk_sampled_image_descriptor, sampler_index);
+
+      bool clamp_to_0 = tex->backend_flags & KK_TEXTURE_FLAG_CLAMP_TO_0;
+      if (clamp_to_0)
+         offs = offsetof(struct kk_sampled_image_descriptor,
+                         clamp_0_sampler_index_or_negative);
 
       nir_def *index = load_resource_deref_desc(
          b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)),
@@ -801,4 +807,61 @@ kk_nir_lower_descriptors(nir_shader *nir,
       nir, lower_ssbo_descriptor, nir_metadata_control_flow, &ctx);
 
    return pass_lower_descriptors || pass_lower_ssbo;
+}
+
+static bool
+lower_poly(struct nir_builder *b, nir_intrinsic_instr *intrin, void *data)
+{
+   switch (intrin->intrinsic) {
+   case nir_intrinsic_load_vs_outputs_poly:
+      return lower_sysval_to_per_draw(b, intrin, vertex_outputs);
+   case nir_intrinsic_load_vertex_param_buffer_poly:
+      return lower_sysval_to_per_draw(b, intrin, vertex_params);
+   case nir_intrinsic_load_tess_param_buffer_poly:
+      return lower_sysval_to_per_draw(b, intrin, tess_params);
+   case nir_intrinsic_load_index_size_poly:
+      return lower_sysval_to_per_draw(b, intrin, index_size);
+   case nir_intrinsic_load_first_vertex:
+      /* Lower only compute shaders */
+      if (*(bool *)data) {
+         uint32_t root_table_offset = kk_per_draw_offset(base_vertex_addr);
+         b->cursor = nir_instr_remove(&intrin->instr);
+         assert((root_table_offset & 3) == 0 && "aligned");
+
+         nir_def *addr = load_per_draw(b, intrin->def.num_components, 64u,
+                                       nir_imm_int(b, root_table_offset), 4);
+
+         nir_def *val = nir_load_global(b, 1u, intrin->def.bit_size, addr);
+
+         nir_def_rewrite_uses(&intrin->def, val);
+         return true;
+      }
+      return false;
+   case nir_intrinsic_load_base_instance:
+      /* Lower only compute shaders */
+      if (*(bool *)data) {
+         uint32_t root_table_offset = kk_per_draw_offset(base_instance_addr);
+         b->cursor = nir_instr_remove(&intrin->instr);
+         assert((root_table_offset & 3) == 0 && "aligned");
+
+         nir_def *addr = load_per_draw(b, intrin->def.num_components, 64u,
+                                       nir_imm_int(b, root_table_offset), 4);
+
+         nir_def *val = nir_load_global(b, 1u, intrin->def.bit_size, addr);
+
+         nir_def_rewrite_uses(&intrin->def, val);
+         return true;
+      }
+      return false;
+   default:
+      return false;
+   }
+}
+
+bool
+kk_nir_lower_poly(struct nir_shader *nir)
+{
+   bool is_compute = nir->info.stage == MESA_SHADER_COMPUTE;
+   return nir_shader_intrinsics_pass(nir, lower_poly, nir_metadata_control_flow,
+                                     &is_compute);
 }

@@ -21,10 +21,14 @@ local C = matrix.new(M, N, 0)
 
 -- Calculate A * B + C.  A and B are UB values, C and the result
 -- are UD values.
-local buf = execute {
+local buf = alloc(M * N, { fill = 0 })
+
+execute {
   src =
-    [[]]
-    .. gen.mov_grf("UB", 10, A:to_row_major())
+    [[@param autoswsb
+
+]]
+    .. gen.mov_grf("ub", 10, A:to_row_major())
 
     -- For `src1`, the source representing the B matrix, DPAS expects
     -- the values to be in a layout that looks like an "interleaved"
@@ -33,23 +37,23 @@ local buf = execute {
     --
     -- See mod/matrix.lua for details on that format.
     --
-    .. gen.mov_grf("UB", 20, B:to_interleaved_row_major(4))
+    .. gen.mov_grf("ub", 20, B:to_interleaved_row_major(4))
 
-    .. gen.mov_grf("UD", 30, C:to_row_major())
+    .. gen.mov_grf("ud", 30, C:to_row_major())
 
     .. (devinfo.ver >= 20 and [[
 
-    dpas.8x8(16)  r40<1>UD  r30<1>UD  r20<1>UB  r10<1>UB  {A@1 $1};
+    dpas.8x8 (16) r40:ud r30:ud r20:ub r10:ub
     @syncnop
 
     ]] or [[
 
-    dpas.8x8(8)  r40<1>UD  r30<1>UD  r20<1>UB  r10<1>UB  {A@1 $1};
+    dpas.8x8 (8) r40:ud r30:ud r20:ub r10:ub
     @syncnop
 
     ]])
 
-    .. gen.write_grfs(40, 8)
+    .. gen.write_grfs(40, 8, "buf0")
     .. [[
 
     @eot
@@ -57,5 +61,5 @@ local buf = execute {
     ]],
 }
 
-r = matrix.from_row_major_buffer(M, N, buf)
+local r = matrix.from_row_major_buffer(M, N, buf:read(M * N))
 r:print()

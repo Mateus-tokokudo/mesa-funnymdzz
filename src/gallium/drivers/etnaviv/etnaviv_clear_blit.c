@@ -64,7 +64,16 @@ etna_blit_save_state(struct etna_context *ctx, bool render_cond)
    util_blitter_save_depth_stencil_alpha(ctx->blitter, ctx->zsa);
    util_blitter_save_stencil_ref(ctx->blitter, &ctx->stencil_ref_s);
    util_blitter_save_sample_mask(ctx->blitter, ctx->sample_mask, 0);
-   util_blitter_save_framebuffer(ctx->blitter, &ctx->framebuffer_s);
+
+   /* Save the framebuffer without the appended 128-bit companion slots, the
+    * restore goes through etna_set_framebuffer_state(..) which appends them
+    * again.
+    */
+   struct pipe_framebuffer_state fb = ctx->framebuffer_s.base;
+   while (fb.nr_cbufs && ctx->framebuffer_s.companion_src[fb.nr_cbufs - 1] != -1)
+      fb.nr_cbufs--;
+
+   util_blitter_save_framebuffer(ctx->blitter, &fb);
    util_blitter_save_fragment_sampler_states(ctx->blitter,
          ctx->num_fragment_samplers, (void **)ctx->sampler);
    util_blitter_save_fragment_sampler_views(ctx->blitter,
@@ -158,6 +167,20 @@ etna_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
        etna_resource_level_newer(&etna_resource(dst->texture)->levels[info.dst.level],
                                  &etna_resource(info.dst.resource)->levels[info.dst.level]))
       info.dst.resource = dst->texture;
+
+   /* RS/BLT can only copy whole pixels, so a multisampled depth-stencil
+    * surface can not be resolved for depth or stencil alone.
+    * Promote the mask to the full format and resolve the whole pixel, like the
+    * blob does.
+    */
+   if (info.src.resource->nr_samples > 1 &&
+       info.src.format == info.dst.format &&
+       util_format_is_depth_and_stencil(info.dst.format)) {
+      unsigned format_mask = util_format_get_mask(info.dst.format);
+
+      if (info.mask & format_mask)
+         info.mask |= format_mask;
+   }
 
    if (ctx->blit(pctx, &info))
       goto success;
@@ -386,14 +409,16 @@ etna_copy_resource_box(struct pipe_context *pctx, struct pipe_resource *dst,
 
    ctx->blit_rb_swap = rb_swap;
 
+   enum pipe_format format = translate_emulated_format_z32f(dst->format);
+
    struct pipe_blit_info blit = {};
-   blit.mask = util_format_get_mask(dst->format);
+   blit.mask = util_format_get_mask(format);
    blit.filter = PIPE_TEX_FILTER_NEAREST;
    blit.src.resource = src;
-   blit.src.format = src->format;
+   blit.src.format = format;
    blit.src.box = *box;
    blit.dst.resource = dst;
-   blit.dst.format = dst->format;
+   blit.dst.format = format;
    blit.dst.box = *box;
 
    blit.dst.box.depth = blit.src.box.depth = 1;

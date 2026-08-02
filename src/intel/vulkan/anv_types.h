@@ -90,7 +90,10 @@
  * and we can't put anything else there we use 64b.
  */
 #define ANV_SURFACE_STATE_SIZE (64)
+
 #define ANV_SAMPLER_STATE_SIZE (32)
+#define ANV_SAMPLER_STATE_DWORDS (ANV_SAMPLER_STATE_SIZE / sizeof(uint32_t))
+#define ANV_SAMPLER_STATE_GPU_SIZE(verx10) (16)
 
 /* For gfx12 we set the streamout buffers using 4 separate commands
  * (3DSTATE_SO_BUFFER_INDEX_*) instead of 3DSTATE_SO_BUFFER. However the layout
@@ -101,6 +104,13 @@
  * 3DSTATE_SO_BUFFER_INDEX_0.
  */
 #define SO_BUFFER_INDEX_0_CMD 0x60
+
+#define ANV_DESCRIPTOR_SET_PUSH_POINTER       (UINT8_MAX - 5)
+#define ANV_DESCRIPTOR_SET_PER_PRIM_PADDING   (UINT8_MAX - 4)
+#define ANV_DESCRIPTOR_SET_NULL               (UINT8_MAX - 3)
+#define ANV_DESCRIPTOR_SET_PUSH_CONSTANTS     (UINT8_MAX - 2)
+#define ANV_DESCRIPTOR_SET_DESCRIPTORS        (UINT8_MAX - 1)
+#define ANV_DESCRIPTOR_SET_COLOR_ATTACHMENTS   UINT8_MAX
 
 struct anv_push_constants {
    /** Push constant data provided by the client through vkPushConstants */
@@ -347,11 +357,6 @@ struct anv_dgc_cs_layout {
    } dispatch;
 };
 
-enum anv_dgc_push_slot_type {
-   ANV_DGC_PUSH_SLOT_TYPE_PUSH_CONSTANTS,
-   ANV_DGC_PUSH_SLOT_TYPE_OTHER,
-};
-
 enum anv_dgc_draw_params {
    ANV_DGC_DRAW_PARAM_BASE_INSTANCE_VERTEX = BITFIELD_BIT(0),
    ANV_DGC_DRAW_PARAM_DRAW_ID              = BITFIELD_BIT(1),
@@ -381,9 +386,15 @@ struct anv_dgc_gfx_descriptor {
          union {
             struct {
                struct anv_dgc_push_stage_slot {
+                  uint16_t set; /* ANV_DESCRIPTOR_SET_* */
+                  /* Used for ANV_DESCRIPTOR_SET_PUSH_POINTER, byte offset in
+                   * the push data of where the 64bit pointer is located.
+                   */
+                  uint16_t push_data_index;
+                  /* Offset to be added to the base push constant pointer. */
                   uint16_t push_data_offset;
+                  /* Size of the push data. */
                   uint16_t push_data_size;
-                  uint32_t type; /* enum anv_dgc_push_slot_type */
                } slots[4];
                uint32_t n_slots;
             } legacy;
@@ -407,7 +418,9 @@ struct anv_dgc_gfx_state {
    struct anv_dgc_gfx_descriptor descriptor;
 
    struct {
-      uint64_t addresses[4];
+      struct {
+         uint64_t addresses[4];
+      } stages[ANV_DGC_N_GFX_STAGES];
    } push_constants;
 
    struct {

@@ -24,9 +24,9 @@
 
 static struct anv_state
 emit_push_constants(struct anv_cmd_buffer *cmd_buffer,
-                    const struct anv_cmd_pipeline_state *pipe_state)
+                    const struct anv_bind_point_state *bind_state)
 {
-   const uint8_t *data = (const uint8_t *) &pipe_state->push_constants;
+   const uint8_t *data = (const uint8_t *) &bind_state->push_constants;
 
    struct anv_state state =
       anv_cmd_buffer_alloc_temporary_state(cmd_buffer,
@@ -35,7 +35,7 @@ emit_push_constants(struct anv_cmd_buffer *cmd_buffer,
    if (state.alloc_size == 0)
       return state;
 
-   memcpy(state.map, data, pipe_state->push_constants_client_size);
+   memcpy(state.map, data, bind_state->push_constants_client_size);
    memcpy(state.map + MAX_PUSH_CONSTANTS_SIZE,
           data + MAX_PUSH_CONSTANTS_SIZE,
           sizeof(struct anv_push_constants) - MAX_PUSH_CONSTANTS_SIZE);
@@ -54,28 +54,33 @@ preprocess_gfx_sequences(struct anv_cmd_buffer *cmd_buffer,
 
    struct anv_device *device = cmd_buffer->device;
    struct anv_cmd_graphics_state *gfx = &cmd_buffer_state->state.gfx;
+   struct anv_bind_point_state *bind_state = anv_cmd_buffer_get_bind_point_state(
+      cmd_buffer_state, VK_PIPELINE_BIND_POINT_GRAPHICS);
+   if (bind_state == NULL)
+      return NULL;
 
    /* Allocate push constants with the cmd_buffer_state data. */
    struct anv_state push_constants_state =
-      emit_push_constants(cmd_buffer, &cmd_buffer_state->state.gfx.base);
+      emit_push_constants(cmd_buffer, gfx->base);
    if (push_constants_state.alloc_size == 0)
       return NULL;
 
    /**/
-   struct anv_dgc_gfx_state gfx_state = {};
+   struct anv_dgc_gfx_state *gfx_state = &cmd_buffer->state.gfx.dgc_state;
+   memset(gfx_state, 0, sizeof(*gfx_state));
    struct anv_state gfx_state_state =
-      anv_cmd_buffer_alloc_temporary_state(cmd_buffer, sizeof(gfx_state), 8);
+      anv_cmd_buffer_alloc_temporary_state(cmd_buffer, sizeof(*gfx_state), 8);
    if (gfx_state_state.map == NULL)
       return NULL;
 
    uint32_t cmd_stride = anv_dgc_fill_gfx_layout(
-      &gfx_state.layout, device, layout, gfx->shaders);
+      &gfx_state->layout, device, layout, gfx->shaders);
    anv_dgc_fill_gfx_state(
-      &gfx_state, cmd_buffer_state, layout, gfx->shaders);
-   anv_write_gfx_indirect_descriptor(device, &gfx_state.descriptor,
+      gfx_state, cmd_buffer_state, layout, gfx->shaders);
+   anv_write_gfx_indirect_descriptor(device, &gfx_state->descriptor,
                                      &cmd_buffer_state->state.gfx);
 
-   memcpy(gfx_state_state.map, &gfx_state, sizeof(gfx_state));
+   memcpy(gfx_state_state.map, gfx_state, sizeof(*gfx_state));
 
    /**/
    struct anv_shader_internal *generate_kernel;
@@ -137,8 +142,7 @@ preprocess_gfx_sequences(struct anv_cmd_buffer *cmd_buffer,
       .const_addr = anv_address_physical(
          anv_cmd_buffer_temporary_state_address(
             cmd_buffer, push_constants_state)),
-      .const_size =
-         cmd_buffer_state->state.gfx.base.push_constants_client_size,
+      .const_size = gfx->base->push_constants_client_size,
 
       .driver_const_addr = anv_address_physical(
          anv_address_add(
@@ -225,10 +229,14 @@ preprocess_cs_sequences(struct anv_cmd_buffer *cmd_buffer,
 
    struct anv_device *device = cmd_buffer->device;
    struct anv_cmd_compute_state *comp_state = &cmd_buffer_state->state.compute;
-   struct anv_cmd_pipeline_state *pipe_state = &comp_state->base;
+   struct anv_bind_point_state *bind_state = anv_cmd_buffer_get_bind_point_state(
+      cmd_buffer_state, VK_PIPELINE_BIND_POINT_COMPUTE);
+
+   if (bind_state == NULL)
+      return NULL;
 
    struct anv_state push_constants_state =
-      emit_push_constants(cmd_buffer, pipe_state);
+      emit_push_constants(cmd_buffer, bind_state);
    if (push_constants_state.alloc_size == 0)
       return NULL;
 
@@ -343,7 +351,7 @@ preprocess_cs_sequences(struct anv_cmd_buffer *cmd_buffer,
       .const_addr = anv_address_physical(
          anv_cmd_buffer_temporary_state_address(cmd_buffer,
                                                 push_constants_state)),
-      .const_size = pipe_state->push_constants_client_size,
+      .const_size = bind_state->push_constants_client_size,
 
       .driver_const_addr = anv_address_physical(
          anv_address_add(
@@ -474,10 +482,10 @@ preprocess_rt_sequences(struct anv_cmd_buffer *cmd_buffer,
 
    struct anv_device *device = cmd_buffer->device;
    struct anv_cmd_ray_tracing_state *rt_state = &cmd_buffer_state->state.rt;
-   struct anv_cmd_pipeline_state *pipe_state = &rt_state->base;
+   struct anv_bind_point_state *bind_state = rt_state->base;
 
    struct anv_state push_constants_state =
-      emit_push_constants(cmd_buffer, pipe_state);
+      emit_push_constants(cmd_buffer, bind_state);
    if (push_constants_state.alloc_size == 0)
       return NULL;
 
@@ -502,9 +510,11 @@ preprocess_rt_sequences(struct anv_cmd_buffer *cmd_buffer,
       },
 #if GFX_VERx10 >= 300
       .CallStackHandler   = anv_shader_internal_get_handler(
+         device->info,
          device->rt_trivial_return, 0),
 #else
       .CallStackHandler   = anv_shader_internal_get_bsr(
+         device->info,
          device->rt_trivial_return, 0),
 #endif
       .AsyncRTStackSize   = rt_state->scratch.layout.ray_stack_stride / 64,
@@ -544,7 +554,9 @@ preprocess_rt_sequences(struct anv_cmd_buffer *cmd_buffer,
             .ThreadPreemption = false,
 #endif
 #if GFX_VER >= 30
-            .RegistersPerThread = ptl_register_blocks(cs_prog_data->base.grf_used),
+            .RegistersPerThread =
+               brw_register_blocks(device->info,
+                                   cs_prog_data->base.grf_used),
 #endif
          },
       },
@@ -609,7 +621,7 @@ preprocess_rt_sequences(struct anv_cmd_buffer *cmd_buffer,
       .const_addr = anv_address_physical(
          anv_cmd_buffer_temporary_state_address(cmd_buffer,
                                                 push_constants_state)),
-      .const_size = pipe_state->push_constants_client_size,
+      .const_size = bind_state->push_constants_client_size,
 
       .driver_const_addr = anv_address_physical(
          anv_address_add(
@@ -703,6 +715,8 @@ void genX(CmdPreprocessGeneratedCommandsEXT)(
       UNREACHABLE("Invalid layout bind point");
       break;
    }
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_DGC;
 }
 
 void genX(CmdExecuteGeneratedCommandsEXT)(
@@ -1003,16 +1017,15 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
 #if GFX_VERx10 >= 125
    case VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR: {
       struct anv_cmd_ray_tracing_state *rt_state = &cmd_buffer->state.rt;
-      struct anv_cmd_pipeline_state *pipe_state = &rt_state->base;
+      struct anv_bind_point_state *bind_state = rt_state->base;
 
       genX(flush_pipeline_select_gpgpu)(cmd_buffer, false);
 
-      genX(flush_descriptor_buffers)(cmd_buffer, pipe_state, ANV_RT_STAGE_BITS);
+      genX(flush_descriptor_buffers)(cmd_buffer, bind_state, ANV_RT_STAGE_BITS);
 
       genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 
-      genX(cmd_buffer_flush_push_descriptors)(cmd_buffer,
-                                              &cmd_buffer->state.rt.base);
+      genX(cmd_buffer_flush_push_descriptors)(cmd_buffer, bind_state);
 
       if (pGeneratedCommandsInfo->sequenceCountAddress != 0) {
          struct anv_address seq_count_addr =
@@ -1104,7 +1117,7 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
       if (pGeneratedCommandsInfo->sequenceCountAddress != 0)
          mi_goto_target(&b, &t);
 
-      cmd_buffer->state.compute.trace_rays_active = true;
+      cmd_buffer->state.rt.trace_rays_active = true;
 
       break;
    }
@@ -1113,4 +1126,6 @@ void genX(CmdExecuteGeneratedCommandsEXT)(
    default:
       UNREACHABLE("Invalid layout binding point");
    }
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_DGC;
 }

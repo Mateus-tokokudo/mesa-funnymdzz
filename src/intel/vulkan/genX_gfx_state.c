@@ -368,7 +368,7 @@ want_stencil_pma_fix(const struct vk_dynamic_graphics_state *dyn,
     * (3DSTATE_DEPTH_BUFFER::SURFACE_TYPE != NULL) &&
     * 3DSTATE_DEPTH_BUFFER::HIZ Enable
     */
-   if (!gfx->hiz_enabled)
+   if (gfx->hiz_usage == ISL_AUX_USAGE_NONE)
       return false;
 
    /* We can't possibly know if HiZ is enabled without the depth attachment */
@@ -850,19 +850,15 @@ update_fs_config(struct anv_gfx_dynamic_state *hw_state,
    if (!fs_prog_data)
       return;
 
-   /* If we have any dynamic bits here, we might need to update the value
-    * in the push constant for the shader.
-    */
-   if (!brw_fs_prog_data_is_dynamic(fs_prog_data))
+   /* Only update the value if the shader uses it. */
+   if (!fs_prog_data->uses_fs_config)
       return;
 
    UNUSED const struct brw_mesh_prog_data *mesh_prog_data = get_gfx_mesh_prog_data(gfx);
 
    enum intel_fs_config fs_config =
       intel_fs_config((struct intel_fs_params) {
-            .shader_sample_shading     = fs_prog_data->sample_shading,
-            .shader_min_sample_shading = fs_prog_data->min_sample_shading,
-            .state_sample_shading      = fs_prog_data->api_sample_shading,
+            .persample_interp          = fs_prog_data->persample_interp,
             .rasterization_samples     = dyn->ms.rasterization_samples,
             .coarse_pixel              = !vk_fragment_shading_rate_is_disabled(&dyn->fsr),
             .alpha_to_coverage         = dyn->ms.alpha_to_coverage_enable,
@@ -1073,9 +1069,8 @@ update_ps(struct anv_gfx_dynamic_state *hw_state,
 
    SET(PS, ps.PositionXYOffsetSelect,
            !fs_prog_data->uses_pos_offset ? POSOFFSET_NONE :
-           brw_fs_prog_data_is_persample(fs_prog_data,
-                                         hw_state->fs_config) ?
-           POSOFFSET_SAMPLE : POSOFFSET_CENTROID);
+           fs_prog_data->persample_dispatch ? POSOFFSET_SAMPLE :
+           POSOFFSET_CENTROID);
 }
 
 ALWAYS_INLINE static void
@@ -1087,8 +1082,7 @@ update_ps_extra_wm(struct anv_gfx_dynamic_state *hw_state,
    if (!fs_prog_data)
       return;
 
-   UNUSED const bool uses_coarse_pixel =
-      brw_fs_prog_data_is_coarse(fs_prog_data, hw_state->fs_config);
+   UNUSED const bool uses_coarse_pixel = fs_prog_data->coarse_pixel_dispatch;
 
    uint32_t InputCoverageMaskState = ICMS_NONE;
    assert(!fs_prog_data->inner_coverage); /* Not available in SPIR-V */
@@ -1104,8 +1098,7 @@ update_ps_extra_wm(struct anv_gfx_dynamic_state *hw_state,
    SET(PS_EXTRA, ps_extra.InputCoverageMaskState, InputCoverageMaskState);
 
    SET(PS_EXTRA, ps_extra.PixelShaderIsPerSample,
-                 brw_fs_prog_data_is_persample(fs_prog_data,
-                                               hw_state->fs_config));
+                 fs_prog_data->persample_dispatch);
 #if GFX_VER >= 11
    SET(PS_EXTRA, ps_extra.PixelShaderIsPerCoarsePixel, uses_coarse_pixel);
 #endif
@@ -1117,7 +1110,7 @@ update_ps_extra_wm(struct anv_gfx_dynamic_state *hw_state,
 #endif
 
    SET(WM, wm.BarycentricInterpolationMode,
-           fs_prog_data_barycentric_modes(fs_prog_data, hw_state->fs_config));
+       fs_prog_data->barycentric_interp_modes);
 
 #if INTEL_WA_18038825448_GFX_VER
    SET(WA_18038825448, coarse_state, uses_coarse_pixel ?
@@ -1439,7 +1432,19 @@ ALWAYS_INLINE static void
 update_line_width(struct anv_gfx_dynamic_state *hw_state,
                   const struct vk_dynamic_graphics_state *dyn)
 {
-   SET(SF, sf.LineWidth, dyn->rs.line.width);
+   /* The way to enable Bresenham lines is to set LineWith = 0.0f in
+    * 3DSTATE_SF, see SKL PRMs, Volume 7: 3D-Media-GPGPU, Zero-Width
+    * (Cosmetic) Line Rasterization :
+    *
+    *    "When the LineWidth is set to zero, the device will use special rules
+    *     to rasterize “cosmetic” lines. The rasterization rules also comply
+    *     with the OpenGL conformance requirements (for 1-pixel wide non-
+    *     smooth lines)."
+    */
+   SET(SF, sf.LineWidth,
+           (dyn->rs.line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM &&
+            dyn->rs.line.width == 1.0f) ?
+           0.0f : dyn->rs.line.width);
 }
 
 ALWAYS_INLINE static void
@@ -2412,7 +2417,8 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
       update_primitive_replication(hw_state, gfx);
 #endif
 
-   if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_WIDTH))
+   if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_WIDTH) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_LINE_MODE))
       update_line_width(hw_state, dyn);
 
    if (gfx->dirty & ANV_CMD_DIRTY_PRERASTER_SHADERS)
@@ -2429,6 +2435,7 @@ cmd_buffer_flush_gfx_runtime_state(struct anv_gfx_dynamic_state *hw_state,
 
    if ((gfx->dirty & ANV_CMD_DIRTY_PRERASTER_SHADERS) ||
        (gfx->dirty & ANV_CMD_DIRTY_RENDER_TARGETS) ||
+       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_CULL_MODE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_RS_FRONT_FACE) ||
@@ -2664,13 +2671,12 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
    .name = hw_state->category.name
 #define SET(s, category, name) \
    s.name = hw_state->category.name
-#define SET_ARRAY(s, category, name)            \
-   do {                                         \
-      assert(sizeof(s.name) ==                  \
-             sizeof(hw_state->category.name));  \
-      memcpy(&s.name,                           \
-             &hw_state->category.name,          \
-             sizeof(s.name));                   \
+#define SET_ARRAY(s, category, name)                             \
+   do {                                                          \
+      assert(ARRAY_SIZE(s.name) ==                               \
+             ARRAY_SIZE(hw_state->category.name));               \
+      for (uint32_t __i = 0; __i < ARRAY_SIZE(s.name); __i++)    \
+         s.name[__i] = hw_state->category.name[__i];             \
    } while (0)
 #define IS_DIRTY(name) BITSET_TEST(hw_state->pack_dirty, ANV_GFX_STATE_##name)
 
@@ -3012,6 +3018,7 @@ cmd_buffer_repack_gfx_state(struct anv_gfx_dynamic_state *hw_state,
          SET(sf, sf, DerefBlockSize);
 #endif
          SET(sf, sf, PointWidthSource);
+         SET(sf, sf, LastPixelEnable);
          SET(sf, sf, LineWidth);
          SET(sf, sf, TriangleStripListProvokingVertexSelect);
          SET(sf, sf, LineStripListProvokingVertexSelect);
@@ -3632,7 +3639,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    const struct vk_dynamic_graphics_state *dyn =
       &cmd_buffer->vk.dynamic_graphics_state;
    struct anv_push_constants *push_consts =
-      &cmd_buffer->state.gfx.base.push_constants;
+      &gfx->base->push_constants;
    struct anv_gfx_dynamic_state *hw_state = &gfx->dyn_state;
 
 #define DEBUG_SHADER_HASH(stage) do {                                   \
@@ -3678,7 +3685,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
       push_consts->gfx.tess_config = hw_state->tess_config;
       cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
                                                 VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-      gfx->base.push_constants_data_dirty = true;
+      gfx->base->push_constants_state = ANV_STATE_NULL;
    }
 
 #if INTEL_WA_14024997852_GFX_VER
@@ -3691,7 +3698,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
    if (IS_DIRTY(FS_CONFIG)) {
       push_consts->gfx.fs_config = hw_state->fs_config;
       cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_FRAGMENT_BIT;
-      gfx->base.push_constants_data_dirty = true;
+      gfx->base->push_constants_state = ANV_STATE_NULL;
    }
 
 #if INTEL_WA_18019110168_GFX_VER
@@ -3699,7 +3706,7 @@ cmd_buffer_gfx_state_emission(struct anv_cmd_buffer *cmd_buffer)
       push_consts->gfx.wa_18019110168 = hw_state->wa_18019110168;
       cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_MESH_BIT_EXT |
                                                 VK_SHADER_STAGE_FRAGMENT_BIT;
-      gfx->base.push_constants_data_dirty = true;
+      gfx->base->push_constants_state = ANV_STATE_NULL;
    }
 #endif
 
@@ -4082,8 +4089,7 @@ genX(cmd_buffer_flush_gfx_hw_state)(struct anv_cmd_buffer *cmd_buffer)
    const struct brw_fs_prog_data *fs_prog_data = get_gfx_fs_prog_data(gfx);
    if (fs_prog_data) {
       genX(cmd_buffer_set_coarse_pixel_active)(
-         cmd_buffer,
-         brw_fs_prog_data_is_coarse(fs_prog_data, hw_state->fs_config));
+         cmd_buffer, fs_prog_data->coarse_pixel_dispatch);
    }
 #endif
 

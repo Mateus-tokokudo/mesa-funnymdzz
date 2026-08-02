@@ -196,6 +196,9 @@ struct ethosu_operation {
          bool depthwise;
          unsigned scale;
          unsigned shift;
+         uint16_t activation;
+         int activation_min;
+         int activation_max;
       } conv;
 
       struct {
@@ -257,6 +260,7 @@ struct ethosu_subgraph {
    uint32_t *cmdstream;
    uint32_t *cursor;
    uint32_t cmdstream_bo;
+   uint32_t perfmon_id;
 
    struct pipe_resource *io_rsrc;
    unsigned io_used;

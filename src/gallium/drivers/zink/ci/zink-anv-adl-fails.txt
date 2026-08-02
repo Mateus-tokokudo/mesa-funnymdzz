@@ -83,13 +83,7 @@ spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.0@rasterpos,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_gs_linked,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_tes_linked,Fail
-spec@!opengl 1.1@depthstencil-default_fb-blit samples=16,Fail
 spec@!opengl 1.1@line-smooth-stipple,Fail
-spec@!opengl 1.1@linestipple,Fail
-spec@!opengl 1.1@linestipple@Factor 2x,Fail
-spec@!opengl 1.1@linestipple@Factor 3x,Fail
-spec@!opengl 1.1@linestipple@Line loop,Fail
-spec@!opengl 1.1@linestipple@Line strip,Fail
 spec@!opengl 1.1@polygon-mode,Fail
 spec@!opengl 1.1@polygon-mode-facing,Fail
 spec@!opengl 1.1@polygon-mode-offset,Fail
@@ -167,62 +161,6 @@ spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 5- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 5- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 6- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 1- X: 3- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 0- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 1- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 2- Y: 6- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 0- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 0- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 1- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 1- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 2- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 2- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 3- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 3- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 4- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 4- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 5- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 5- Grid: true,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 6- Grid: false,Fail
-spec@arb_sample_locations@test@MSAA: 16- X: 3- Y: 6- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 0- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 0- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 2- X: 0- Y: 1- Grid: false,Fail
@@ -391,24 +329,6 @@ spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 5- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 5- Grid: true,Fail
 spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 6- Grid: false,Fail
 spec@arb_sample_locations@test@MSAA: 8- X: 3- Y: 6- Grid: true,Fail
-spec@arb_sample_shading@samplemask 16 all,Fail
-spec@arb_sample_shading@samplemask 16 all@0.062500 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@0.125000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@0.250000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@0.500000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@1.000000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@noms mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16 all@noms partition,Fail
-spec@arb_sample_shading@samplemask 16 all@sample mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16,Fail
-spec@arb_sample_shading@samplemask 16@0.062500 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@0.125000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@0.250000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@0.500000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@1.000000 mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@noms mask_in_one,Fail
-spec@arb_sample_shading@samplemask 16@noms partition,Fail
-spec@arb_sample_shading@samplemask 16@sample mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2 all,Fail
 spec@arb_sample_shading@samplemask 2 all@0.500000 mask_in_one,Fail
 spec@arb_sample_shading@samplemask 2 all@1.000000 mask_in_one,Fail
@@ -476,7 +396,6 @@ spec@egl_chromium_sync_control@conformance@eglGetSyncValuesCHROMIUM_ust_test,Fai
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
-spec@ext_framebuffer_multisample@clip-and-scissor-blit 16 msaa,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-export,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-ownership_transfer,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount,Fail
@@ -508,20 +427,9 @@ spec@ext_transform_feedback@tessellation triangle_fan flat_first,Fail
 spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@miptree-gles srgb-fp@sRGB decode full precision,Fail
 
-# uprev Piglit in Mesa
-spec@!opengl 1.1@large-tex,Fail
-spec@!opengl 1.1@large-tex@test_clear_tex_sub_image,Fail
-
 #glcts update
 spec@glsl-4.00@execution@built-in-functions@fs-inverse-dmat4,Crash
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_src_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_dst_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_src_x,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_src_x,Fail
 spec@arb_gpu_shader_fp64@uniform_buffers@fs-ubo-load.indirect.3,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_src_dst_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_src_y,Fail
 spec@arb_gpu_shader_fp64@execution@built-in-functions@gs-inverse-dmat4,Crash
 spec@glsl-4.00@execution@built-in-functions@gs-inverse-dmat4,Crash
 spec@glsl-4.00@execution@built-in-functions@vs-inverse-dmat4,Crash
@@ -530,21 +438,14 @@ spec@arb_gpu_shader_fp64@execution@built-in-functions@vs-inverse-dmat4,Crash
 spec@arb_gpu_shader_fp64@execution@glsl-fs-loop-unroll-mul-fp64,Crash
 spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_src_dst_y,Fail
 glx@glx-swap-pixmap-bad,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_src_dst_x,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_src_dst_x,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full precision,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_dst_y,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_mag_reverse_dst_x,Fail
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min_reverse_dst_x,Fail
 
 spec@arb_sample_shading@samplemask 4,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp,Fail
 spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp@sRGB decode full precision,Fail
 
-dEQP-GLES3.functional.fbo.blit.rect.nearest_consistency_out_of_bounds_min,Fail
 spec@!opengl 1.1@depthstencil-default_fb-blit samples=2,Fail
 spec@arb_sample_shading@samplemask 6,Fail
 
@@ -558,64 +459,3 @@ wayland-dEQP-EGL.functional.resize.surface_size.stretch_width,Fail
 # shader objects #13839
 spec@arb_occlusion_query@occlusion_query_meta_fragments,Fail
 spec@arb_occlusion_query@occlusion_query_meta_save,Fail
-
-# uprev VVL in Mesa
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.default_framebuffer,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_1,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_16,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_2,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_4,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_rbo_8,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_1,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_16,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_2,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_4,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.multisample_texture_8,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.singlesample_rbo,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.at_sample_id.singlesample_texture,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.default_framebuffer,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_rbo_1,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_rbo_16,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_rbo_2,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_rbo_4,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_rbo_8,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_texture_1,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_texture_16,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_texture_2,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_texture_4,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.multisample_texture_8,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.singlesample_rbo,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.centroid_qualified.singlesample_texture,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.default_framebuffer,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_rbo_1,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_rbo_16,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_rbo_2,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_rbo_4,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_rbo_8,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_texture_1,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_texture_16,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_texture_2,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_texture_4,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.multisample_texture_8,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.singlesample_rbo,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.dynamic_sample_number.singlesample_texture,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_0_default_framebuffer,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_0_singlesample_rbo,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_0_singlesample_texture,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_n_default_framebuffer,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_n_singlesample_rbo,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_n_singlesample_texture,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.default_framebuffer,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_rbo_1,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_rbo_16,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_rbo_2,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_rbo_4,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_rbo_8,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_texture_1,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_texture_16,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_texture_2,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_texture_4,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.multisample_texture_8,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.singlesample_rbo,Crash
-noopt-dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.static_sample_number.singlesample_texture,Crash
-

@@ -230,6 +230,7 @@ emit_shader_regs(struct fd_screen *screen, fd_cs &cs, const struct ir3_shader_va
          .fullregfootprint = so->info.max_reg + 1,
          .branchstack = ir3_shader_branchstack_hw(so),
          .threadsize = thrsz,
+         .computerrmodeen = so->cs.round_robin_mode,
          .earlypreamble = so->early_preamble,
          .mergedregs = so->mergedregs,
       ));
@@ -1673,10 +1674,14 @@ fd6_program_create(void *data, const struct ir3_shader_variant *bs,
       /* On a6xx all shader stages use driver params pushed in cmdstream: */
       num_dp += num_ubo_dp;
       num_ubo_dp = 0;
+   } else {
+      /* On later gens, VS dp's are split into push const + ubo: */
+      num_ubo_dp += num_dp;
    }
 
    state->num_driver_params = num_dp;
    state->num_ubo_driver_params = num_ubo_dp;
+   state->needs_driver_params = (num_dp + num_ubo_dp) > 0;
 
    /* dual source blending has an extra fs output in the 2nd slot */
    if (fs->fs.color_is_dual_source) {

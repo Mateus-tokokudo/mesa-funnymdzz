@@ -9,8 +9,6 @@
 #include "util/u_math.h"
 #include "util/u_memory.h"
 
-#include "tgsi/tgsi_dump.h"
-
 #include "r300_cb.h"
 #include "r300_context.h"
 #include "r300_emit.h"
@@ -330,7 +328,7 @@ static void r300_translate_fragment_shader(
     struct pipe_shader_state state)
 {
     struct r300_fragment_program_compiler compiler;
-    int wpos, face;
+    int face;
     unsigned i;
     union r300_shader_code code;
     code.f = shader;
@@ -384,7 +382,6 @@ static void r300_translate_fragment_shader(
         return;
     }
 
-    wpos = shader->inputs.wpos;
     face = shader->inputs.face;
 
     if (!r300->screen->caps.is_r500 ||
@@ -392,19 +389,8 @@ static void r300_translate_fragment_shader(
         compiler.Base.remove_unused_constants = true;
     }
 
-    /**
-     * Transform the program to support WPOS.
-     *
-     * Introduce a small fragment at the start of the program that will be
-     * the only code that directly reads the WPOS input.
-     * All other code pieces that reference that input will be rewritten
-     * to read from a newly allocated temporary. */
-    if (wpos != ATTR_UNUSED) {
-        /* Moving the input to some other reg is not really necessary. */
-        rc_transform_fragment_wpos(&compiler.Base, wpos, wpos, true);
-    }
-
-    if (face != ATTR_UNUSED) {
+    /* R3xx/R4xx emulation already provides FACE in the API convention. */
+    if (face != ATTR_UNUSED && r300->screen->caps.is_r500) {
         rc_transform_fragment_face(&compiler.Base, face);
     }
 

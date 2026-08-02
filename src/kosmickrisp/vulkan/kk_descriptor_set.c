@@ -82,7 +82,10 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
        descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
       VK_FROM_HANDLE(kk_sampler, sampler, info->sampler);
 
-      plane_count = MAX2(plane_count, sampler->plane_count);
+      if (sampler->has_border)
+         assert(plane_count == 1);
+      else
+         plane_count = MAX2(plane_count, sampler->plane_count);
 
       for (uint8_t plane = 0; plane < plane_count; plane++) {
          /* We need to replicate the last sampler plane out to all image
@@ -95,6 +98,22 @@ get_sampled_image_view_desc(VkDescriptorType descriptor_type,
          desc[plane].lod_bias_fp16 = sampler->lod_bias_fp16;
          desc[plane].lod_min_fp16 = sampler->lod_min_fp16;
          desc[plane].lod_max_fp16 = sampler->lod_max_fp16;
+         desc[plane].clamp_0_sampler_index_or_negative = -1;
+      }
+
+      if (sampler->has_border) {
+         assert(sampler->plane_count == 2);
+         desc[0].clamp_0_sampler_index_or_negative =
+            sampler->planes[1].hw->index;
+
+         assert(desc[0].clamp_0_sampler_index_or_negative >= 0 &&
+                "we have a border colour");
+
+         static_assert(sizeof(desc[0].border) == sizeof(sampler->custom_border),
+                       "fixed format");
+
+         memcpy(desc[0].border, sampler->custom_border.uint32,
+                sizeof(sampler->custom_border));
       }
    }
 

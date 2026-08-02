@@ -14,6 +14,7 @@
 
 #include "frontend/winsys_handle.h"
 #include "util/format/u_format.h"
+#include "util/os_misc.h"
 #include "util/u_debug_image.h"
 #include "util/u_drm.h"
 #include "util/u_gen_mipmap.h"
@@ -27,6 +28,7 @@
 #include "decode.h"
 #include "pan_afbc.h"
 #include "pan_afrc.h"
+#include "pan_blitter.h"
 #include "pan_bo.h"
 #include "pan_context.h"
 #include "pan_resource.h"
@@ -34,56 +36,6 @@
 #include "pan_tiling.h"
 #include "pan_trace.h"
 #include "pan_util.h"
-
-static void
-panfrost_clear_depth_stencil(struct pipe_context *pipe,
-                             struct pipe_surface *dst, unsigned clear_flags,
-                             double depth, unsigned stencil, unsigned dstx,
-                             unsigned dsty, unsigned width, unsigned height,
-                             bool render_condition_enabled)
-{
-   PAN_TRACE_FUNC(PAN_TRACE_GL_RESOURCE);
-
-   struct panfrost_context *ctx = pan_context(pipe);
-
-   if (render_condition_enabled && !panfrost_render_condition_check(ctx))
-      return;
-
-   /* Legalize here because it could trigger a recursive blit otherwise */
-   struct panfrost_resource *rdst = pan_resource(dst->texture);
-   enum pipe_format dst_view_format = util_format_linear(dst->format);
-   pan_legalize_format(ctx, rdst, dst_view_format, true, false);
-
-   panfrost_blitter_save(
-      ctx, render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE);
-   util_blitter_clear_depth_stencil(ctx->blitter, dst, clear_flags, depth,
-                                    stencil, dstx, dsty, width, height);
-}
-
-static void
-panfrost_clear_render_target(struct pipe_context *pipe,
-                             struct pipe_surface *dst,
-                             const union pipe_color_union *color, unsigned dstx,
-                             unsigned dsty, unsigned width, unsigned height,
-                             bool render_condition_enabled)
-{
-   PAN_TRACE_FUNC(PAN_TRACE_GL_RESOURCE);
-
-   struct panfrost_context *ctx = pan_context(pipe);
-
-   if (render_condition_enabled && !panfrost_render_condition_check(ctx))
-      return;
-
-   /* Legalize here because it could trigger a recursive blit otherwise */
-   struct panfrost_resource *rdst = pan_resource(dst->texture);
-   enum pipe_format dst_view_format = util_format_linear(dst->format);
-   pan_legalize_format(ctx, rdst, dst_view_format, true, false);
-
-   panfrost_blitter_save(
-      ctx, (render_condition_enabled ? PAN_RENDER_COND : PAN_RENDER_BASE) | PAN_SAVE_FRAGMENT_CONSTANT);
-   util_blitter_clear_render_target(ctx->blitter, dst, color, dstx, dsty, width,
-                                    height);
-}
 
 static uint64_t
 panfrost_max_res_size_b(unsigned arch)
@@ -279,6 +231,8 @@ panfrost_resource_import_bo(struct panfrost_resource *rsc,
    rsc->bo = panfrost_bo_import(dev, fd);
    if (!rsc->bo)
       return -1;
+
+   pan_crc_state_set_ptr(&rsc->crc_state, &rsc->bo->ptr);
 
    return 0;
 }
@@ -846,7 +800,7 @@ panfrost_should_checksum(const struct panfrost_device *dev,
 
    return pres->base.bind & PIPE_BIND_RENDER_TARGET && panfrost_is_2d(pres) &&
           bytes_per_pixel <= bytes_per_pixel_max &&
-          pres->base.last_level == 0 && !(dev->debug & PAN_DBG_NO_CRC);
+          !(dev->debug & PAN_DBG_NO_CRC);
 }
 
 static bool
@@ -869,8 +823,12 @@ panfrost_resource_try_setup(struct pipe_screen *screen,
    /* Z32_S8X24 variants are actually stored in 2 planes (one per
     * component), we have to adjust the format on the first plane.
     */
+   unsigned arch = pan_arch(dev->kmod.dev->props.gpu_id);
    if (fmt == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT)
       fmt = PIPE_FORMAT_Z32_FLOAT;
+   else if (drm_is_afbc(chosen_mod) && fmt == PIPE_FORMAT_Z24X8_UNORM &&
+            arch >= 9)
+      fmt = PIPE_FORMAT_Z24_UNORM_PACKED;
 
    pres->modifier = chosen_mod;
 
@@ -1049,10 +1007,10 @@ panfrost_can_create_resource(struct pipe_screen *screen,
    if (!os_get_total_physical_memory(&system_memory))
       return false;
 
-   /* Limit maximum texture size to a quarter of the system memory, to avoid
-    * allocating huge textures on systems with little memory.
-    */
-   return tmp.plane.layout.data_size_B <= system_memory / 4;
+   const float heap_memory_percent = pan_screen(screen)->heap_memory_percent;
+   uint64_t memory = os_get_gpu_heap_size(heap_memory_percent, NULL);
+
+   return tmp.plane.layout.data_size_B <= memory;
 }
 
 static struct pipe_resource *
@@ -1166,6 +1124,7 @@ panfrost_resource_create_with_modifier(struct pipe_screen *screen,
 
       so->bo =
          panfrost_bo_create(dev, so->plane.layout.data_size_B, flags, res_label);
+      pan_crc_state_set_ptr(&so->crc_state, &so->bo->ptr);
 
       if (!so->bo) {
          panfrost_resource_destroy(screen, &so->base);
@@ -1355,7 +1314,7 @@ pan_blit_from_staging(struct pipe_context *pctx,
    blit.mask = util_format_get_mask(blit.src.format);
    blit.filter = PIPE_TEX_FILTER_NEAREST;
 
-   panfrost_blit_no_afbc_legalization(pctx, &blit);
+   panfrost_blitter_blit_legalized(pctx, &blit);
 }
 
 static void
@@ -1375,7 +1334,7 @@ pan_blit_to_staging(struct pipe_context *pctx, struct panfrost_transfer *trans)
    blit.mask = util_format_get_mask(blit.dst.format);
    blit.filter = PIPE_TEX_FILTER_NEAREST;
 
-   panfrost_blit_no_afbc_legalization(pctx, &blit);
+   panfrost_blitter_blit_legalized(pctx, &blit);
 }
 
 static void
@@ -1473,7 +1432,7 @@ pan_dump_resource(struct panfrost_context *ctx, struct panfrost_resource *rsc)
       blit.mask = util_format_get_mask(blit.dst.format);
       blit.filter = PIPE_TEX_FILTER_NEAREST;
 
-      panfrost_blit(pctx, &blit);
+      panfrost_blitter_blit(pctx, &blit);
 
       linear = pan_resource(plinear);
    }
@@ -1714,6 +1673,7 @@ panfrost_ptr_map(struct pipe_context *pctx, struct pipe_resource *resource,
             panfrost_bo_unreference(rsrc->bo);
             rsrc->bo = newbo;
             rsrc->plane.base = newbo->ptr.gpu;
+            pan_crc_state_set_ptr(&rsrc->crc_state, &newbo->ptr);
 
             if (!copy_resource && drm_is_afbc(rsrc->modifier)) {
                if (panfrost_resource_init_afbc_headers(rsrc))
@@ -1863,7 +1823,7 @@ pan_resource_modifier_convert(struct panfrost_context *ctx,
             if (drm_is_mtk_tiled(rsrc->modifier))
                screen->vtbl.mtk_detile(ctx, &blit);
             else
-               panfrost_blit_no_afbc_legalization(&ctx->base, &blit);
+               panfrost_blitter_blit_legalized(&ctx->base, &blit);
          }
       }
 
@@ -1887,6 +1847,7 @@ pan_resource_modifier_convert(struct panfrost_context *ctx,
       rsrc->bo = tmp_rsrc->bo;
       rsrc->plane.base = rsrc->bo->ptr.gpu;
       panfrost_bo_reference(rsrc->bo);
+      pan_crc_state_set_ptr(&rsrc->crc_state, &rsrc->bo->ptr);
 
       rsrc->owns_label = tmp_rsrc->owns_label;
       tmp_rsrc->owns_label = false;
@@ -2222,7 +2183,7 @@ pan_resource_afbcp_commit(struct panfrost_context *ctx,
    prsrc->plane.layout.data_size_B = prsrc->afbcp->size;
    prsrc->plane.base = prsrc->afbcp->packed_bo->ptr.gpu;
    prsrc->image.props.crc = false;
-   prsrc->valid.crc = false;
+   pan_crc_state_invalidate(&prsrc->crc_state);
 
    for (unsigned level = 0; level <= prsrc->base.last_level; ++level)
       prsrc->plane.layout.slices[level] =
@@ -2234,6 +2195,7 @@ pan_resource_afbcp_commit(struct panfrost_context *ctx,
    panfrost_bo_unreference(prsrc->bo);
    prsrc->bo = prsrc->afbcp->packed_bo;
    prsrc->afbcp->packed_bo = NULL;
+   pan_crc_state_set_ptr(&prsrc->crc_state, &prsrc->bo->ptr);
 
    pan_resource_afbcp_stop(prsrc);
 }
@@ -2321,7 +2283,7 @@ panfrost_ptr_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
    struct panfrost_device *dev = pan_device(pctx->screen);
 
    if (transfer->usage & PIPE_MAP_WRITE)
-      prsrc->valid.crc = false;
+      pan_crc_state_invalidate(&prsrc->crc_state);
 
    /* AFBC/AFRC will use a staging resource. `initialized` will be set when
     * the fragment job is created; this is deferred to prevent useless surface
@@ -2340,11 +2302,12 @@ panfrost_ptr_unmap(struct pipe_context *pctx, struct pipe_transfer *transfer)
             pan_resource_afbcp_stop(prsrc);
 
             panfrost_resource_setup(screen, prsrc, DRM_FORMAT_MOD_LINEAR,
-                                    prsrc->image.props.format, 0);
+                                    prsrc->base.format, 0);
 
             prsrc->bo = pan_resource(trans->staging.rsrc)->bo;
             prsrc->plane.base = prsrc->bo->ptr.gpu;
             panfrost_bo_reference(prsrc->bo);
+            pan_crc_state_set_ptr(&prsrc->crc_state, &prsrc->bo->ptr);
 
             prsrc->owns_label = pan_resource(trans->staging.rsrc)->owns_label;
             pan_resource(trans->staging.rsrc)->owns_label = false;
@@ -2463,6 +2426,18 @@ static enum pipe_format
 panfrost_resource_get_internal_format(struct pipe_resource *rsrc)
 {
    struct panfrost_resource *prsrc = (struct panfrost_resource *)rsrc;
+
+   /* With AFBC enabled, Z24X8 can be packed into Z24 internally. However, with
+    * AFBC we can't map directly to CPU so we setup a new resource in the
+    * external format which is handled by Panfrost. To stop u_transfer_helper
+    * from trying to handle it, we return the external format here.
+    */
+   if (prsrc->base.format == PIPE_FORMAT_Z24X8_UNORM &&
+       prsrc->image.props.format == PIPE_FORMAT_Z24_UNORM_PACKED) {
+      assert(drm_is_afbc(prsrc->modifier));
+      return PIPE_FORMAT_Z24X8_UNORM;
+   }
+
    return prsrc->image.props.format;
 }
 
@@ -2578,7 +2553,7 @@ panfrost_resource_context_init(struct pipe_context *pctx)
    pctx->texture_map = u_transfer_helper_transfer_map;
    pctx->texture_unmap = u_transfer_helper_transfer_unmap;
    pctx->resource_copy_region = util_resource_copy_region;
-   pctx->blit = panfrost_blit;
+   pctx->blit = panfrost_blitter_blit;
    pctx->generate_mipmap = panfrost_generate_mipmap;
    pctx->flush_resource = panfrost_flush_resource;
    pctx->invalidate_resource = panfrost_invalidate_resource;
@@ -2586,6 +2561,6 @@ panfrost_resource_context_init(struct pipe_context *pctx)
    pctx->buffer_subdata = u_default_buffer_subdata;
    pctx->texture_subdata = u_default_texture_subdata;
    pctx->clear_buffer = u_default_clear_buffer;
-   pctx->clear_render_target = panfrost_clear_render_target;
-   pctx->clear_depth_stencil = panfrost_clear_depth_stencil;
+   pctx->clear_render_target = panfrost_blitter_clear_render_target;
+   pctx->clear_depth_stencil = panfrost_blitter_clear_depth_stencil;
 }

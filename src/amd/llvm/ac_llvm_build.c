@@ -455,31 +455,15 @@ LLVMValueRef ac_build_shader_clock(struct ac_llvm_context *ctx, mesa_scope scope
 
 LLVMValueRef ac_build_ballot(struct ac_llvm_context *ctx, LLVMValueRef value)
 {
-   const char *name;
+   const char *name = ctx->wave_size == 64 ? "llvm.amdgcn.ballot.i64" : "llvm.amdgcn.ballot.i32";
 
-   if (LLVMTypeOf(value) == ctx->i1)
-      value = LLVMBuildZExt(ctx->builder, value, ctx->i32, "");
-
-   if (ctx->wave_size == 64)
-      name = "llvm.amdgcn.icmp.i64.i32";
-   else
-      name = "llvm.amdgcn.icmp.i32.i32";
-
-   LLVMValueRef args[3] = {value, ctx->i32_0, LLVMConstInt(ctx->i32, LLVMIntNE, 0)};
-
-   /* We currently have no other way to prevent LLVM from lifting the icmp
-    * calls to a dominating basic block.
-    */
-   ac_build_optimization_barrier(ctx, &args[0], false);
-
-   args[0] = ac_to_integer(ctx, args[0]);
-
-   return ac_build_intrinsic(ctx, name, ctx->iN_wavemask, args, 3, 0);
+   assert(LLVMTypeOf(value) == ctx->i1);
+   return ac_build_intrinsic(ctx, name, ctx->iN_wavemask, &value, 1, 0);
 }
 
 LLVMValueRef ac_build_vote_all(struct ac_llvm_context *ctx, LLVMValueRef value)
 {
-   LLVMValueRef active_set = ac_build_ballot(ctx, ctx->i32_1);
+   LLVMValueRef active_set = ac_build_ballot(ctx, ctx->i1true);
    LLVMValueRef vote_set = ac_build_ballot(ctx, value);
    return LLVMBuildICmp(ctx->builder, LLVMIntEQ, vote_set, active_set, "");
 }
@@ -1192,7 +1176,7 @@ void ac_set_range_metadata(struct ac_llvm_context *ctx, LLVMValueRef value, unsi
 
 LLVMValueRef ac_get_thread_id(struct ac_llvm_context *ctx)
 {
-   return ac_build_mbcnt(ctx, LLVMConstInt(ctx->iN_wavemask, ~0ull, 0));
+   return ac_build_mbcnt(ctx, LLVMConstAllOnes(ctx->iN_wavemask));
 }
 
 /*
@@ -1822,7 +1806,7 @@ LLVMValueRef ac_build_cvt_pk_i16(struct ac_llvm_context *ctx, LLVMValueRef args[
    assert(bits == 8 || bits == 10 || bits == 16);
 
    LLVMValueRef max_rgb = LLVMConstInt(ctx->i32, bits == 8 ? 127 : bits == 10 ? 511 : 32767, 0);
-   LLVMValueRef min_rgb = LLVMConstInt(ctx->i32, bits == 8 ? -128 : bits == 10 ? -512 : -32768, 0);
+   LLVMValueRef min_rgb = LLVMConstInt(ctx->i32, bits == 8 ? -128 : bits == 10 ? -512 : -32768, 1);
    LLVMValueRef max_alpha = bits != 10 ? max_rgb : ctx->i32_1;
    LLVMValueRef min_alpha = bits != 10 ? min_rgb : LLVMConstInt(ctx->i32, -2, 0);
 
@@ -1995,11 +1979,27 @@ LLVMValueRef ac_build_fsat(struct ac_llvm_context *ctx, LLVMValueRef src,
    return result;
 }
 
+static uint64_t ac_mask_const_uint(LLVMTypeRef type, uint64_t value)
+{
+   /* If value is sign-extended to uint64_t, mask out the upper bits
+    * for types smaller than 64-bits. Otherwise, LLVM complains that the value can't fit.
+    */
+   if (LLVMGetIntTypeWidth(type) < 64) {
+      value &= BITFIELD64_MASK(LLVMGetIntTypeWidth(type));
+   }
+
+   return value;
+}
+
 LLVMValueRef ac_const_uint_vec(struct ac_llvm_context *ctx, LLVMTypeRef type, uint64_t value)
 {
+   bool isVector = LLVMGetTypeKind(type) == LLVMVectorTypeKind;
+   LLVMTypeRef ty = isVector ? LLVMGetElementType(type) : type;
 
-   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
-      LLVMValueRef scalar = LLVMConstInt(LLVMGetElementType(type), value, 0);
+   value = ac_mask_const_uint(ty, value);
+
+   if (isVector) {
+      LLVMValueRef scalar = LLVMConstInt(ty, value, 0);
       unsigned vec_size = LLVMGetVectorSize(type);
       LLVMValueRef *scalars = alloca(vec_size * sizeof(LLVMValueRef));
 
@@ -2212,7 +2212,7 @@ LLVMValueRef ac_find_lsb(struct ac_llvm_context *ctx, LLVMTypeRef dst_type, LLVM
    /* TODO: We need an intrinsic to skip this conditional. */
    /* Check for zero: */
    return LLVMBuildSelect(ctx->builder, LLVMBuildICmp(ctx->builder, LLVMIntEQ, src0, zero, ""),
-                          LLVMConstInt(ctx->i32, -1, 0), lsb, "");
+                          LLVMConstInt(ctx->i32, -1, 1), lsb, "");
 }
 
 static struct ac_llvm_flow *get_current_flow(struct ac_llvm_context *ctx)
@@ -2624,7 +2624,7 @@ static LLVMValueRef _ac_build_permlane16(struct ac_llvm_context *ctx, LLVMValueR
    LLVMValueRef args[6] = {
       src,
       src,
-      LLVMConstInt(ctx->i32, sel, false),
+      LLVMConstInt(ctx->i32, ac_mask_const_uint(ctx->i32, sel), false),
       LLVMConstInt(ctx->i32, sel >> 32, false),
       ctx->i1true, /* fi */
       bound_ctrl ? ctx->i1true : ctx->i1false,
@@ -2791,11 +2791,11 @@ static LLVMValueRef get_reduction_identity(struct ac_llvm_context *ctx, nir_op o
       case nir_op_umin:
          return LLVMConstInt(ctx->i8, UINT8_MAX, 0);
       case nir_op_imax:
-         return LLVMConstInt(ctx->i8, INT8_MIN, 0);
+         return LLVMConstInt(ctx->i8, INT8_MIN, 1);
       case nir_op_umax:
          return ctx->i8_0;
       case nir_op_iand:
-         return LLVMConstInt(ctx->i8, -1, 0);
+         return LLVMConstInt(ctx->i8, -1, 1);
       case nir_op_ior:
          return ctx->i8_0;
       case nir_op_ixor:
@@ -2820,13 +2820,13 @@ static LLVMValueRef get_reduction_identity(struct ac_llvm_context *ctx, nir_op o
       case nir_op_fmin:
          return LLVMConstReal(ctx->f16, INFINITY);
       case nir_op_imax:
-         return LLVMConstInt(ctx->i16, INT16_MIN, 0);
+         return LLVMConstInt(ctx->i16, INT16_MIN, 1);
       case nir_op_umax:
          return ctx->i16_0;
       case nir_op_fmax:
          return LLVMConstReal(ctx->f16, -INFINITY);
       case nir_op_iand:
-         return LLVMConstInt(ctx->i16, -1, 0);
+         return LLVMConstInt(ctx->i16, -1, 1);
       case nir_op_ior:
          return ctx->i16_0;
       case nir_op_ixor:
@@ -2851,13 +2851,13 @@ static LLVMValueRef get_reduction_identity(struct ac_llvm_context *ctx, nir_op o
       case nir_op_fmin:
          return LLVMConstReal(ctx->f32, INFINITY);
       case nir_op_imax:
-         return LLVMConstInt(ctx->i32, INT32_MIN, 0);
+         return LLVMConstInt(ctx->i32, INT32_MIN, 1);
       case nir_op_umax:
          return ctx->i32_0;
       case nir_op_fmax:
          return LLVMConstReal(ctx->f32, -INFINITY);
       case nir_op_iand:
-         return LLVMConstInt(ctx->i32, -1, 0);
+         return LLVMConstInt(ctx->i32, -1, 1);
       case nir_op_ior:
          return ctx->i32_0;
       case nir_op_ixor:
@@ -3135,7 +3135,6 @@ LLVMValueRef ac_build_inclusive_scan(struct ac_llvm_context *ctx, LLVMValueRef s
 
    if (LLVMTypeOf(src) == ctx->i1 && op == nir_op_iadd) {
       LLVMBuilderRef builder = ctx->builder;
-      src = LLVMBuildZExt(builder, src, ctx->i32, "");
       result = ac_build_ballot(ctx, src);
       result = ac_build_mbcnt(ctx, result);
       result = LLVMBuildAdd(builder, result, src, "");
@@ -3157,11 +3156,8 @@ LLVMValueRef ac_build_exclusive_scan(struct ac_llvm_context *ctx, LLVMValueRef s
    LLVMValueRef result;
 
    if (LLVMTypeOf(src) == ctx->i1 && op == nir_op_iadd) {
-      LLVMBuilderRef builder = ctx->builder;
-      src = LLVMBuildZExt(builder, src, ctx->i32, "");
       result = ac_build_ballot(ctx, src);
-      result = ac_build_mbcnt(ctx, result);
-      return result;
+      return ac_build_mbcnt(ctx, result);
    }
 
    ac_build_optimization_barrier(ctx, &src, false);

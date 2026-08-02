@@ -655,6 +655,8 @@ elk_nir_optimize(nir_shader *nir, bool is_scalar,
 {
    bool progress;
 
+   OPT(nir_opt_uub, &(nir_opt_uub_options){});
+
    do {
       progress = false;
       OPT(nir_shrink_vec_array_vars, nir_var_function_temp);
@@ -723,6 +725,7 @@ elk_nir_optimize(nir_shader *nir, bool is_scalar,
       OPT(nir_opt_peephole_select, &peephole_select_options);
 
       OPT(nir_opt_intrinsics);
+      OPT(nir_opt_fp_math_ctrl);
       OPT(nir_opt_idiv_const, 32);
       OPT(nir_opt_algebraic);
 
@@ -755,7 +758,7 @@ elk_nir_optimize(nir_shader *nir, bool is_scalar,
          OPT(nir_opt_loop_unroll);
       }
       OPT(nir_opt_remove_phis);
-      OPT(nir_opt_gcm, false);
+      OPT(nir_opt_gcm, false, true);
       OPT(nir_opt_undef);
       OPT(nir_lower_pack);
    } while (progress);
@@ -985,6 +988,9 @@ elk_preprocess_nir(const struct elk_compiler *compiler, nir_shader *nir,
    /* See also elk_nir_trig_workarounds.py */
    if (compiler->precise_trig)
       OPT(elk_nir_apply_trig_workarounds);
+
+   if (compiler->limit_trig_input_range)
+      OPT(elk_nir_limit_trig_input_range_workaround);
 
    /* This workaround existing for performance reasons. Since it requires not
     * setting RENDER_SURFACE_STATE::SurfaceArray when the array length is 1,
@@ -1736,9 +1742,6 @@ elk_nir_apply_key(nir_shader *nir,
       .lower_subgroup_masks = true,
    };
    OPT(nir_lower_subgroups, &subgroups_options);
-
-   if (key->limit_trig_input_range)
-      OPT(elk_nir_limit_trig_input_range_workaround);
 
    if (progress) {
       const bool is_scalar = compiler->scalar_stage[nir->info.stage];

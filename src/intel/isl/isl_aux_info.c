@@ -93,6 +93,7 @@ struct aux_usage_info {
 #define x false
 static const struct aux_usage_info info[] = {
 /*         write_behavior c fc pr fra */
+   AUX(         COMPRESS, Y, x, x, x, ZCS)
    AUX(     COMPRESS_HIZ, Y, Y, x, x, HIZ)
    AUX(     COMPRESS_HIZ, Y, Y, x, x, HIZ_CCS)
    AUX(         COMPRESS, Y, Y, x, x, HIZ_CCS_WT)
@@ -144,14 +145,7 @@ isl_aux_get_initial_state(const struct intel_device_info *devinfo,
    case ISL_AUX_USAGE_HIZ:
    case ISL_AUX_USAGE_HIZ_CCS:
    case ISL_AUX_USAGE_HIZ_CCS_WT:
-      if (devinfo->ver >= 20) {
-         /* According to HSD 22011236099, there are no illegal values for HiZ.
-          * As neither the main and aux surfaces contain anything of interest,
-          * treat them as being in sync. This state can avoid the need to
-          * ambiguate in some cases.
-          */
-         return ISL_AUX_STATE_RESOLVED;
-      } else if (zeroed && devinfo->ver <= 11) {
+      if (zeroed && devinfo->ver <= 11) {
          /* On ICL and prior, fast-clearing a HiZ block fills it with zeroes.
           * On gfx12+, it is filled with a non-zero value.
           */
@@ -180,6 +174,7 @@ isl_aux_get_initial_state(const struct intel_device_info *devinfo,
    case ISL_AUX_USAGE_CCS_E:
    case ISL_AUX_USAGE_FCV_CCS_E:
    case ISL_AUX_USAGE_STC_CCS:
+   case ISL_AUX_USAGE_ZCS:
       if (zeroed) {
          /* From the Sky Lake PRM, "MCS Buffer for Render Target(s)":
           *

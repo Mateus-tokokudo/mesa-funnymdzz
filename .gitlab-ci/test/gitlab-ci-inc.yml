@@ -67,6 +67,10 @@
   variables:
     S3_ARTIFACT_NAME: mesa-x86_64-default-debugoptimized
 
+.test-opencl-cts:
+  variables:
+    OPENCL_CTS_TAG: ${CONDITIONAL_BUILD_OPENCL_CTS_TAG}
+
 .test-android:
   extends:
     - .test

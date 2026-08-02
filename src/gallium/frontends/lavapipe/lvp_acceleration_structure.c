@@ -8,7 +8,7 @@
 #include "lvp_private.h"
 
 #include "radix_sort/radix_sort_u64.h"
-#include "bvh/vk_bvh.h"
+#include "bvh/vk_bvh_defines.h"
 
 struct radix_sort_vk_target_config lvp_radix_sort_config = {
    .keyval_dwords = 2,
@@ -55,26 +55,23 @@ lvp_init_radix_sort(struct lvp_device *device)
    simple_mtx_unlock(&device->radix_sort_lock);
 }
 
-static void
-lvp_get_leaf_node_size(VkGeometryTypeKHR geometry_type, uint32_t *ir_leaf_node_size,
-                       uint32_t *output_leaf_node_size)
+static uint32_t
+lvp_get_leaf_node_size(VkGeometryTypeKHR geometry_type)
 {
    switch (geometry_type) {
    case VK_GEOMETRY_TYPE_TRIANGLES_KHR:
-      *ir_leaf_node_size = sizeof(struct vk_ir_triangle_node);
-      *output_leaf_node_size = sizeof(struct lvp_bvh_triangle_node);
+      return sizeof(struct lvp_bvh_triangle_node);
       break;
    case VK_GEOMETRY_TYPE_AABBS_KHR:
-      *ir_leaf_node_size = sizeof(struct vk_ir_aabb_node);
-      *output_leaf_node_size = sizeof(struct lvp_bvh_aabb_node);
+      return sizeof(struct lvp_bvh_aabb_node);
       break;
    case VK_GEOMETRY_TYPE_INSTANCES_KHR:
-      *ir_leaf_node_size = sizeof(struct vk_ir_instance_node);
-      *output_leaf_node_size = sizeof(struct lvp_bvh_instance_node);
+      return sizeof(struct lvp_bvh_instance_node);
       break;
    default:
       break;
    }
+   return 0;
 }
 
 static VkDeviceSize
@@ -83,11 +80,7 @@ lvp_get_as_size_internal(VkGeometryTypeKHR geometry_type, uint32_t leaf_node_cou
    uint32_t internal_node_count = MAX2(leaf_node_count, 2) - 1;
    uint32_t nodes_size = internal_node_count * sizeof(struct lvp_bvh_box_node);
 
-   uint32_t ir_leaf_node_size = 0;
-   uint32_t output_leaf_node_size = 0;
-   lvp_get_leaf_node_size(geometry_type, &ir_leaf_node_size, &output_leaf_node_size);
-
-   nodes_size += leaf_node_count * output_leaf_node_size;
+   nodes_size += leaf_node_count * lvp_get_leaf_node_size(geometry_type);
 
    nodes_size = util_align_npot(nodes_size, LVP_BVH_NODE_PREFETCH_SIZE);
 
@@ -169,29 +162,35 @@ lvp_cmd_fill_buffer_addr(VkCommandBuffer cmdbuf, VkDeviceAddress addr,
 }
 
 static void
-lvp_enqueue_encode_as(VkCommandBuffer commandBuffer, const struct vk_acceleration_structure_build_state *state)
+lvp_enqueue_encode(VkCommandBuffer commandBuffer, struct vk_device *device, struct vk_meta_device *meta,
+                   const struct vk_acceleration_structure_build_args *args, struct vk_acceleration_structure_build_state *states,
+                   uint32_t build_count, bool flushed_cp_after_init_update_scratch, bool flushed_compute_after_init_update_scratch)
 {
    VK_FROM_HANDLE(lvp_cmd_buffer, cmd_buffer, commandBuffer);
-   VK_FROM_HANDLE(vk_acceleration_structure, dst, state->build_info->dstAccelerationStructure);
 
-   struct vk_cmd_queue_entry *entry =
-      linear_zalloc_child(cmd_buffer->vk.cmd_queue.ctx, offsetof(struct vk_cmd_queue_entry, u) + sizeof(struct lvp_cmd_encode_as));
-   if (!entry)
-      return;
+   for (uint32_t i = 0; i < build_count; i++) {
+      struct vk_acceleration_structure_build_state *state = &states[i];
+      VK_FROM_HANDLE(vk_acceleration_structure, dst, state->build_info->dstAccelerationStructure);
 
-   entry->type = LVP_CMD_ENCODE_AS;
+      struct vk_cmd_queue_entry *entry =
+         linear_zalloc_child(cmd_buffer->vk.cmd_queue.ctx, offsetof(struct vk_cmd_queue_entry, u) + sizeof(struct lvp_cmd_encode_as));
+      if (!entry)
+         return;
 
-   uint64_t intermediate_header_addr = state->build_info->scratchData.deviceAddress + state->scratch.header_offset;
-   uint64_t intermediate_bvh_addr = state->build_info->scratchData.deviceAddress + state->scratch.ir_offset;
+      entry->type = LVP_CMD_ENCODE_AS;
 
-   struct lvp_cmd_encode_as *cmd = (struct lvp_cmd_encode_as *)((uint8_t *)entry + offsetof(struct vk_cmd_queue_entry, u));
-   cmd->dst = dst;
-   cmd->intermediate_as_addr = intermediate_bvh_addr;
-   cmd->intermediate_header_addr = intermediate_header_addr;
-   cmd->leaf_count = state->leaf_node_count;
-   cmd->geometry_type = vk_get_as_geometry_type(state->build_info);
+      uint64_t intermediate_header_addr = state->build_info->scratchData.deviceAddress + state->scratch.header_offset;
+      uint64_t intermediate_bvh_addr = state->build_info->scratchData.deviceAddress + state->scratch.ir_offset;
 
-   list_addtail(&entry->cmd_link, &cmd_buffer->vk.cmd_queue.cmds);
+      struct lvp_cmd_encode_as *cmd = (struct lvp_cmd_encode_as *)((uint8_t *)entry + offsetof(struct vk_cmd_queue_entry, u));
+      cmd->dst = dst;
+      cmd->intermediate_as_addr = intermediate_bvh_addr;
+      cmd->intermediate_header_addr = intermediate_header_addr;
+      cmd->leaf_count = state->leaf_node_count;
+      cmd->geometry_type = vk_get_as_geometry_type(state->build_info);
+
+      list_addtail(&entry->cmd_link, &cmd_buffer->vk.cmd_queue.cmds);
+   }
 }
 
 static uint32_t
@@ -407,9 +406,8 @@ lvp_encode_as(struct vk_acceleration_structure *dst, VkDeviceAddress intermediat
    uint8_t *output = (void *)(uintptr_t)vk_acceleration_structure_get_va(dst);
    struct lvp_bvh_header *output_header = (void *)output;
 
-   uint32_t ir_leaf_node_size = 0;
-   uint32_t output_leaf_node_size = 0;
-   lvp_get_leaf_node_size(geometry_type, &ir_leaf_node_size, &output_leaf_node_size);
+   uint32_t ir_leaf_node_size = vk_ir_node_size(geometry_type, 0);
+   uint32_t output_leaf_node_size = lvp_get_leaf_node_size(geometry_type);
 
    uint32_t root_offset = leaf_count * ir_leaf_node_size;
    const struct vk_ir_box_node *ir_box_nodes = (const void *)(ir_bvh + root_offset);
@@ -624,16 +622,9 @@ lvp_CopyAccelerationStructureToMemoryKHR(VkDevice _device, VkDeferredOperationKH
    return VK_ERROR_FEATURE_NOT_PRESENT;
 }
 
-static VkResult
-lvp_encode_prepare(VkCommandBuffer cmd_buffer, const struct vk_acceleration_structure_build_state *state)
-{
-   return VK_SUCCESS;
-}
-
 const struct vk_acceleration_structure_build_ops accel_struct_ops = {
    .get_as_size = lvp_get_as_size,
-   .encode_prepare[0] = lvp_encode_prepare,
-   .encode_as[0] = lvp_enqueue_encode_as,
+   .encode = lvp_enqueue_encode,
 };
 
 VkResult

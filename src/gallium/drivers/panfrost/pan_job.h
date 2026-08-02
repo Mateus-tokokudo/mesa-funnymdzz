@@ -15,6 +15,7 @@
 #include "pan_jm.h"
 #include "pan_mempool.h"
 #include "pan_resource.h"
+#include "util/perf/u_trace.h"
 
 /* A panfrost_batch corresponds to a bound FBO we're rendering to,
  * collecting over multiple draws. */
@@ -126,6 +127,11 @@ struct panfrost_batch {
       uint64_t psiz;
    } varyings;
 
+   /* FS SRT entry holding a single constant buffer for fullscreen-draw
+    * texcoord varyings on PAN_TABLE_ATTRIBUTE_BUFFER.
+    */
+   uint64_t fullscreen_texcoord_buf;
+
    /* Index array */
    uint64_t indices;
 
@@ -173,6 +179,9 @@ struct panfrost_batch {
       struct panfrost_jm_batch jm;
       struct panfrost_csf_batch csf;
    };
+
+   /* u_trace support for GPU tracing / perfetto */
+   struct u_trace trace;
 };
 
 /* Functions for managing the above */

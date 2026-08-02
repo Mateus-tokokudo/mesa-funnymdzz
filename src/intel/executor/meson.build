@@ -12,8 +12,15 @@ executor_includes = [
   inc_intel,
 ]
 
+executor_manual_h = custom_target(
+  'executor_manual.h',
+  input: 'executor.1',
+  output: 'executor_manual.h',
+  command: [prog_python, files_xxd, '@INPUT@', '@OUTPUT@', '--name', 'executor_manual'],
+)
+
 executor_hw_libs = []
-foreach v: ['90', '110', '120', '125', '200', '300']
+foreach v: ['90', '110', '120', '125', '200', '300', '350']
   executor_hw_libs += static_library(
     'executor_hw_ver@0@'.format(v),
     ['executor_genx.c', gen_xml_pack],
@@ -37,14 +44,17 @@ executor = executable(
   [
     'executor_main.c',
     'executor_macros.c',
+    executor_manual_h,
+    # TODO: Move slice.h into a proper common place.
+    '../mda/slice.c',
   ],
   dependencies: [
     dep_libdrm,
     dep_lua,
     dep_valgrind,
-    idep_brw_asm,
     idep_genxml,
-    idep_intel_decoder_brw,
+    idep_intel_compiler_gen,
+    idep_intel_decoder_gen,
     idep_intel_dev,
     idep_intel_perf,
     idep_libintel_common,

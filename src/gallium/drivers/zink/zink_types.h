@@ -263,6 +263,7 @@ enum zink_debug {
    ZINK_DEBUG_RPLOADS = (1<<21),
    ZINK_DEBUG_NOGENERAL = (1<<22),
    ZINK_DEBUG_RPSTORES = (1<<23),
+   ZINK_DEBUG_PERFINFO = (1<<24),
 };
 
 enum zink_pv_emulation_primitive {
@@ -638,9 +639,6 @@ struct zink_batch_state {
    struct util_dynarray acquires;
    struct util_dynarray acquire_flags;
 
-   VkAccessFlags unordered_write_access;
-   VkPipelineStageFlags unordered_write_stages;
-
    simple_mtx_t exportable_lock;
 
    struct util_queue_fence flush_completed;
@@ -701,8 +699,15 @@ struct bo_export {
    struct list_head link;
 };
 
+enum zink_bo_type {
+   ZINK_BO_REAL,
+   ZINK_BO_SLAB,
+   ZINK_BO_SPARSE,
+};
+
 struct zink_bo {
-   struct pb_buffer base;
+   struct pb_buffer_lean base;
+   enum zink_bo_type type;
 
    union {
       struct {
@@ -749,7 +754,7 @@ struct zink_bo {
 };
 
 static inline struct zink_bo *
-zink_bo(struct pb_buffer *pbuf)
+zink_bo(struct pb_buffer_lean *pbuf)
 {
    return (struct zink_bo*)pbuf;
 }
@@ -1195,6 +1200,7 @@ struct zink_resource_object {
    VkPipelineStageFlags unordered_access_stage;
    VkAccessFlags unordered_access;
    VkAccessFlags last_write;
+   unsigned transfer_rp;
 
    /* 'access' is propagated from unordered_access to handle ops occurring
     * in the ordered cmdbuf which can promote barriers to unordered
@@ -1435,14 +1441,12 @@ struct zink_screen {
 
    struct {
       struct pb_cache bo_cache;
-      struct pb_slabs bo_slabs[NUM_SLAB_ALLOCATORS];
-      unsigned min_alloc_size;
+      struct pb_slabs bo_slabs;
       uint32_t next_bo_unique_id;
    } pb;
    uint8_t heap_map[ZINK_HEAP_MAX][VK_MAX_MEMORY_TYPES];  // mapping from zink heaps to memory type indices
    uint8_t heap_count[ZINK_HEAP_MAX];  // number of memory types per zink heap
    bool resizable_bar;
-   bool always_cached_upload;
 
    uint64_t total_video_mem;
    uint64_t clamp_video_mem;
@@ -1975,6 +1979,9 @@ struct zink_context {
    struct pipe_resource *index_buffer; //last index buffer
    unsigned index_size;
 
+   unsigned rp_counter;
+   unsigned last_transfer_sync;
+
    uint32_t num_so_targets;
    struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
    bool dirty_so_targets;
@@ -2001,6 +2008,9 @@ struct zink_context {
    bool rasterizer_discard_changed : 1;
    bool rp_tc_info_updated : 1;
    bool last_work_was_compute : 1;
+   bool needs_transfer_sync : 1;
+   bool can_promote_depth_op : 1;
+   bool depth_op_promoted : 1;
 };
 
 static inline struct zink_context *

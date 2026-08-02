@@ -25,19 +25,22 @@ function DP4A(a, b, c)
   return r
 end
 
-local r = execute {
-  src = [[
-    @id   g9
+local buf = alloc(16)
 
-    @mov  g1  0x0102037F
-    @mov  g2  50
+execute [[
+    @param autoswsb
 
-    dp4a(8)  g3<1>UD  g2<8,8,1>UD  g1<8,8,1>UD  g1<8,8,1>UD  { align1 @1 1Q };
+    @id   r9
+    @addr r8 buf0 r9
 
-    @write g9 g3
+    @mov  r2  0x0102037F
+    @mov  r3  50
+
+    dp4a (8) r4      r3      r2      r2
+
+    @store r8 r4
     @eot
-  ]],
-}
+]]
 
 print("expected", DP4A({1,2,3,0x7F}, {1,2,3,0x7F}, 50))
-print("calculated", r[0])
+print("calculated", buf[0])

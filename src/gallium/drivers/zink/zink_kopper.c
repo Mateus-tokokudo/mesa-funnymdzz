@@ -96,7 +96,7 @@ kopper_CreateSurface(struct zink_screen *screen, struct kopper_displaytarget *cd
    switch (type) {
 #ifdef VK_USE_PLATFORM_XCB_KHR
    case VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR: {
-#ifdef GLX_USE_APPLE
+#ifdef GLX_USE_APPLEGL
       error = VK_INCOMPLETE;
 #else
       VkXcbSurfaceCreateInfoKHR *xcb = (VkXcbSurfaceCreateInfoKHR *)&cdt->info.bos;
@@ -1207,12 +1207,15 @@ zink_kopper_set_swap_interval(struct pipe_screen *pscreen, struct pipe_resource 
 
    if (old_present_mode == cdt->present_mode)
       return;
-   cdt->present_mode = old_present_mode;
    if (res->obj->dt_idx == UINT32_MAX) {
-      /* only update swapchain when there is no current acquire to avoid flickering */
+      /* only update swapchain when there is no current acquire to avoid flickering,
+       * otherwise the update is deferred to the next present
+       */
       VkResult ret = update_swapchain(screen, cdt, cdt->caps.currentExtent.width, cdt->caps.currentExtent.height);
-      if (ret != VK_SUCCESS)
+      if (ret != VK_SUCCESS) {
+         cdt->present_mode = old_present_mode;
          mesa_loge("zink: failed to set swap interval!");
+      }
    }
 }
 

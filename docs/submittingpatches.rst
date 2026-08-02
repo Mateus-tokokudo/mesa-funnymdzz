@@ -149,7 +149,7 @@ Patch formatting
 
    ::
 
-      Closes: https://gitlab.freedesktop.org/mesa/mesa/-/issues/1
+      Closes: https://gitlab.freedesktop.org/mesa/mesa/-/work_items/1
 
    Prefer the full URL to just ``Closes: #1``, since the URL makes it
    easier to get to the bug page from ``git log``
@@ -211,6 +211,12 @@ You can produce those fixes lines by running this command once::
     git config --global alias.fixes "show -s --pretty='format:Fixes: %h (\"%s\")'"
 
 After that, using ``git fixes <sha1>`` will print the full line for you.
+
+.. warning::
+   Reverted commits are *not* automatically backported! You need to include the
+   ``Fixes:`` tag for the commit it reverts if you want to backport the revert
+   everywhere, or the ``Backport-to: YY.N`` tag if you want to backport it only
+   in a specific release branch.
 
 The stable tag
 --------------

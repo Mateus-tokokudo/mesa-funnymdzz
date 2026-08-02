@@ -10,6 +10,19 @@ This is an experimental driver. Support has only been confirmed on the devices
 listed below and should not be interpreted as support for every Mali GPU or
 kbase kernel release.
 
+## KRAID shader compiler
+
+Release packages include Mesa's upstream KRAID Rust shader compiler for
+Valhall and newer Mali GPUs. Upstream keeps compiler selection opt-in while
+coverage is expanded. Select stages with `PAN_USE_KRAID`; for example:
+
+```sh
+PAN_USE_KRAID=all vulkan-app
+```
+
+Stage names such as `vs`, `fs`, `cs`, and `internal` can be combined. Leave
+the variable unset to use the established Bifrost compiler path.
+
 ## Tested hardware
 
 - Mali-G710 MC7 in Google Tensor G2 (Pixel 7), with Debian 13 in DroidSpaces.

@@ -35,6 +35,8 @@
 #define KK_MAX_MULTIVIEW_VIEW_COUNT    32
 #define KK_TEXTURE_BUFFER_WIDTH        (1u << 14)
 #define KK_MAX_OCCLUSION_QUERIES       (32768)
+#define KK_MIN_SAMPLE_LOCATION         (0.0f)
+#define KK_MAX_SAMPLE_LOCATION         (0.9375f)
 
 #define KK_SPARSE_ADDR_SPACE_SIZE (1ull << 39)
 
@@ -46,8 +48,6 @@
    MTL_RESOURCE_STORAGE_MODE_SHARED |                                          \
       MTL_RESOURCE_CPU_CACHE_MODE_DEFAULT_CACHE |                              \
       MTL_RESOURCE_TRACKING_MODE_UNTRACKED
-
-#define KK_MAX_CMD_BUFFERS 256
 
 struct kk_addr_range {
    uint64_t addr;

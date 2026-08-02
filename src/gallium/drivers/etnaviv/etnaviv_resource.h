@@ -84,6 +84,15 @@ struct etna_resource_level {
    uint32_t seqno;
 };
 
+/* A 128-bit color level is emulated as two stacked G32R32F planes, the second
+ * (BA) plane starts halfway into the level.
+ */
+static inline unsigned
+etna_resource_level_second_plane_offset(const struct etna_resource_level *lvl)
+{
+   return (lvl->size * lvl->depth) / 2;
+}
+
 /* returns TRUE if a is newer than b */
 static inline bool
 etna_resource_level_newer(struct etna_resource_level *a,
@@ -233,6 +242,9 @@ struct etna_resource {
 
    struct pipe_box *damage;
    unsigned num_damage;
+
+   enum pipe_format internal_format;
+   struct etna_resource *separate_stencil;
 };
 
 /* returns TRUE if a is newer than b */
@@ -274,14 +286,20 @@ etna_resource_sampler_only(const struct pipe_resource *pres)
 }
 
 static inline bool
-etna_resource_hw_tileable(bool use_blt, const struct pipe_resource *pres)
+etna_format_hw_tileable(bool use_blt, enum pipe_format format)
 {
    if (use_blt)
       return true;
 
    /* RS can only tile 16bpp or 32bpp formats */
-   return util_format_get_blocksize(pres->format) == 2 ||
-          util_format_get_blocksize(pres->format) == 4;
+   return util_format_get_blocksize(format) == 2 ||
+          util_format_get_blocksize(format) == 4;
+}
+
+static inline bool
+etna_resource_hw_tileable(bool use_blt, const struct pipe_resource *pres)
+{
+   return etna_format_hw_tileable(use_blt, pres->format);
 }
 
 struct etna_resource *

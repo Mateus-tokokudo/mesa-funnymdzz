@@ -131,15 +131,18 @@ static nir_function *mangle_and_find(struct vtn_builder *b,
    /* try and find in current shader first. */
    nir_function *found = nir_shader_get_function_for_name(b->shader, mname);
 
-   /* if not found here find in clc shader and create a decl mirroring it */
-   if (!found && b->options->clc_shader && b->options->clc_shader != b->shader) {
-      found = nir_shader_get_function_for_name(b->options->clc_shader, mname);
+   if (!found) {
+      /* if not found here find in clc shader and create a decl mirroring it */
+      if (b->options->clc_shader)
+         found = nir_shader_get_function_for_name(b->options->clc_shader, mname);
 
       /* try upcasting fp16 */
       if (!found && try_fp16_lowering) {
+         /* We might actually be inside libclc in which case clc_shader is NULL */
+         const nir_shader *libclc = b->options->clc_shader ? b->options->clc_shader : b->shader;
          fp16_name = mname;
          vtn_opencl_mangle(name, const_mask, num_srcs, src_types, true, &mname);
-         found = nir_shader_get_function_for_name(b->options->clc_shader, mname);
+         found = nir_shader_get_function_for_name(libclc, mname);
       }
 
       if (found) {
@@ -530,10 +533,12 @@ static uint8_t fp16_lowering_supported(enum OpenCLstd_Entrypoints opcode)
    case OpenCLstd_Ldexp:
    case OpenCLstd_Lgamma_r:
    case OpenCLstd_Pown:
-   case OpenCLstd_Remquo:
    case OpenCLstd_Rootn:
       /* second argument shouldn't be touched at all */
       return 0xff ^ (1 << 2);
+   case OpenCLstd_Remquo:
+      /* third argument is the integer quotient pointer. */
+      return 0xff ^ (1 << 3);
    /* the second argument is a pointer to a float
     * a new enough libclc supports it though
     */
@@ -703,11 +708,46 @@ handle_special(struct vtn_builder *b, uint32_t opcode,
    if (!ret)
       vtn_fail("No NIR equivalent");
 
+   switch (opcode) {
    /* libclc's cbrt() implementation fails to flush subnormal numbers to zero
     * even when flush-to-zero is required. Manually flush its output.
     */
-   if (opcode == OpenCLstd_Cbrt) {
+   case OpenCLstd_Cbrt:
       ret = nir_fcanonicalize(nb, ret);
+      break;
+
+   /* Cospi is always expected to return +0.0 instead of -0.0 */
+   case OpenCLstd_Cospi: {
+      if (nb->fp_math_ctrl & nir_fp_preserve_signed_zero)
+         ret = nir_fadd_imm(nb, ret, 0.0);
+      break;
+   }
+
+   /* Sinpi expects a resulting zero to be of the same sign as the input */
+   case OpenCLstd_Sinpi: {
+      if (nb->fp_math_ctrl & nir_fp_preserve_signed_zero) {
+         ret = nir_bcsel(nb, nir_feq_imm(nb, ret, 0.0), nir_copysign(nb, ret, srcs[0]), ret);
+      }
+      break;
+   }
+
+   case OpenCLstd_Tanpi: {
+      if (nb->fp_math_ctrl & nir_fp_preserve_signed_zero) {
+         nir_def *remainder = nir_fmod(nb, nir_fabs(nb, srcs[0]), nir_imm_floatN_t(nb, 2.0, ret->bit_size));
+         nir_def *is_odd = nir_feq_imm(nb, remainder, 1.0);
+         nir_def *is_even = nir_feq_imm(nb, remainder, 0.0);
+
+         /* tanpi(n) is copysign(0.0, - n) for odd integers n. */
+         ret = nir_bcsel(nb, is_odd, nir_copysign(nb, ret, nir_fneg(nb, srcs[0])), ret);
+
+         /* tanpi(n) is copysign(0.0, n) for even integers n. */
+         ret = nir_bcsel(nb, is_even, nir_copysign(nb, ret, srcs[0]), ret);
+      }
+      break;
+   }
+
+   default:
+      break;
    }
 
    return ret;

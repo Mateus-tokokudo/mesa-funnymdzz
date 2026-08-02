@@ -53,12 +53,14 @@ struct radv_address_binding_report {
    VkDeviceAddressBindingTypeEXT binding_type;
    uint64_t object_handle;
    VkObjectType object_type;
+   char *object_name;
 };
 
 struct radv_address_binding_tracker {
    VkDebugUtilsMessengerEXT messenger;
    struct util_dynarray reports;
    simple_mtx_t mtx;
+   struct radv_instance *instance;
 };
 
 #endif /* RADV_DEBUG_HANG_H */

@@ -35,8 +35,26 @@ void r300_emit_blend_state(struct r300_context* r300,
         } else if (cb->format == PIPE_FORMAT_R16G16B16X16_FLOAT) {
             WRITE_CS_TABLE(blend->cb_noclamp_noalpha, size);
         } else {
+            struct r300_resource *tex = r300_resource(cb->texture);
+            unsigned colormask = blend->state.rt[0].colormask;
             unsigned swz = r300_surface(cb)->colormask_swizzle;
-            WRITE_CS_TABLE(blend->cb_clamp[swz], size);
+
+            /* Pre-R5xx can lose parts of unblended masked writes to microtiled
+             * color buffers. An identity blend with colorbuffer reads enabled
+             * makes the cache preserve untouched channels and pixels through
+             * read-modify-write.
+             */
+            if (!r300->screen->caps.is_r500 &&
+                tex->tex.microtile != RADEON_LAYOUT_LINEAR &&
+                cb->texture->nr_samples <= 1 &&
+                r300_is_blending_supported(r300->screen, cb->format) &&
+                !blend->state.rt[0].blend_enable &&
+                !blend->state.logicop_enable &&
+                colormask != 0 &&
+                colormask != PIPE_MASK_RGBA)
+                WRITE_CS_TABLE(blend->cb_clamp_masked_write[swz], size);
+            else
+                WRITE_CS_TABLE(blend->cb_clamp[swz], size);
         }
     } else {
         WRITE_CS_TABLE(blend->cb_no_readwrite, size);
@@ -705,12 +723,18 @@ void r300_emit_query_start(struct r300_context *r300, unsigned size, void*state)
     }
 
     if (use_dummy_z) {
+        unsigned depthpitch = 4 | R300_DEPTHMICROTILE_TILED_SQUARE;
+
+#if UTIL_ARCH_BIG_ENDIAN
+        depthpitch |= R300_DEPTHENDIAN(R300_SURF_DWORD_SWAP);
+#endif
+
         OUT_CS_REG(R300_ZB_FORMAT, R300_DEPTHFORMAT_16BIT_INT_Z);
 
         OUT_CS_REG(R300_ZB_DEPTHOFFSET, 0);
         OUT_CS_RELOC(surf);
 
-        OUT_CS_REG(R300_ZB_DEPTHPITCH, 4 | R300_DEPTHMICROTILE_TILED_SQUARE);
+        OUT_CS_REG(R300_ZB_DEPTHPITCH, depthpitch);
         OUT_CS_RELOC(surf);
     }
 
@@ -1536,6 +1560,8 @@ unsigned r300_get_num_cs_end_dwords(struct r300_context *r300)
     dwords += r300->hyperz_state.size + 2; /* emit_hyperz_end + zcache flush */
     if (r300->screen->caps.is_r500)
         dwords += 2; /* emit_index_bias */
+    if (!r300->screen->caps.has_tcl && r300->screen->caps.has_hardware_tcl)
+        dwords += 2; /* VAP status reset for other GL users/DDX */
     dwords += 3; /* MSPOS */
 
     return dwords;

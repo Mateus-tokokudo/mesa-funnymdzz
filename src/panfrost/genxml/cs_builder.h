@@ -13,6 +13,7 @@
 #include "gen_macros.h"
 
 #include "util/bitset.h"
+#include "util/fast_idiv_by_const.h"
 #include "util/u_dynarray.h"
 
 #ifdef __cplusplus
@@ -240,7 +241,7 @@ cs_builder_init(struct cs_builder *b, const struct cs_builder_conf *conf,
    b->conf = *conf;
    b->root_chunk.buffer = root_buffer;
    b->cur_chunk.buffer = root_buffer;
-   b->cur_ls_tracker = &b->root_ls_tracker,
+   b->cur_ls_tracker = &b->root_ls_tracker;
 
    memset(b->cur_ls_tracker, 0, sizeof(*b->cur_ls_tracker));
 
@@ -1689,8 +1690,8 @@ cs_finish_fragment(struct cs_builder *b, bool increment_frag_completed,
 }
 
 static inline void
-cs_add32(struct cs_builder *b, struct cs_index dest, struct cs_index src,
-         int32_t imm)
+cs_add_imm32(struct cs_builder *b, struct cs_index dest, struct cs_index src,
+             int32_t imm)
 {
    cs_emit(b, ADD_IMM32, I) {
       I.destination = cs_dst32(b, dest);
@@ -1700,8 +1701,8 @@ cs_add32(struct cs_builder *b, struct cs_index dest, struct cs_index src,
 }
 
 static inline void
-cs_add64(struct cs_builder *b, struct cs_index dest, struct cs_index src,
-         int32_t imm)
+cs_add_imm64(struct cs_builder *b, struct cs_index dest, struct cs_index src,
+             int32_t imm)
 {
    cs_emit(b, ADD_IMM64, I) {
       I.destination = cs_dst64(b, dest);
@@ -1730,7 +1731,7 @@ cs_move_reg32(struct cs_builder *b, struct cs_index dest, struct cs_index src)
       I.source = cs_src32(b, src);
    }
 #else
-   cs_add32(b, dest, src, 0);
+   cs_add_imm32(b, dest, src, 0);
 #endif
 }
 
@@ -1837,6 +1838,260 @@ cs_wait_indirect(struct cs_builder *b)
    cs_emit(b, WAIT, I) {
       I.wait_mode = MALI_CS_WAIT_MODE_INDIRECT;
    }
+}
+#endif
+
+#if PAN_ARCH >= 13
+static inline void
+cs_add32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+         struct cs_index src1)
+{
+   cs_emit(b, ADD32, I) {
+      I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
+      I.source_1 = cs_src32(b, src1);
+   }
+}
+
+static inline void
+cs_sub32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+         struct cs_index src1)
+{
+   cs_emit(b, SUB32, I) {
+      I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
+      I.source_1 = cs_src32(b, src1);
+   }
+}
+
+static inline void
+cs_add64(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+         struct cs_index src1)
+{
+   cs_emit(b, ADD64, I) {
+      I.destination = cs_dst64(b, dest);
+      I.source_0 = cs_src64(b, src0);
+      I.source_1 = cs_src64(b, src1);
+   }
+}
+
+static inline void
+cs_sub64(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+         struct cs_index src1)
+{
+   cs_emit(b, SUB64, I) {
+      I.destination = cs_dst64(b, dest);
+      I.source_0 = cs_src64(b, src0);
+      I.source_1 = cs_src64(b, src1);
+   }
+}
+
+static inline void
+cs_lshift_imm32(struct cs_builder *b, struct cs_index dest, struct cs_index src,
+                uint8_t imm)
+{
+   cs_emit(b, LSHIFT_IMM32, I) {
+      I.destination = cs_dst32(b, dest);
+      I.source = cs_src32(b, src);
+      I.shift_amount = imm;
+   }
+}
+
+static inline void
+cs_lshift32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+            struct cs_index src1)
+{
+   cs_emit(b, LSHIFT32, I) {
+      I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
+      I.source_1 = cs_src32(b, src1);
+   }
+}
+
+static inline void
+cs_rshift_imm_u32(struct cs_builder *b, struct cs_index dest,
+                  struct cs_index src, uint8_t imm)
+{
+   cs_emit(b, RSHIFT_IMM_U32, I) {
+      I.destination = cs_dst32(b, dest);
+      I.source = cs_src32(b, src);
+      I.shift_amount = imm;
+   }
+}
+
+static inline void
+cs_rshift_imm_s32(struct cs_builder *b, struct cs_index dest,
+                  struct cs_index src, int8_t imm)
+{
+   cs_emit(b, RSHIFT_IMM_S32, I) {
+      I.destination = cs_dst32(b, dest);
+      I.source = cs_src32(b, src);
+      I.shift_amount = imm;
+   }
+}
+
+
+static inline void
+cs_rshift_u32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+              struct cs_index src1)
+{
+   cs_emit(b, RSHIFT_U32, I) {
+      I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
+      I.source_1 = cs_src32(b, src1);
+   }
+}
+
+static inline void
+cs_rshift_s32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+              struct cs_index src1)
+{
+   cs_emit(b, RSHIFT_S32, I) {
+      I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
+      I.source_1 = cs_src32(b, src1);
+   }
+}
+
+static inline void
+cs_lshift_imm64(struct cs_builder *b, struct cs_index dest, struct cs_index src,
+                uint8_t imm)
+{
+   cs_emit(b, LSHIFT_IMM64, I) {
+      I.destination = cs_dst64(b, dest);
+      I.source = cs_src64(b, src);
+      I.shift_amount = imm;
+   }
+}
+
+static inline void
+cs_lshift64(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+            struct cs_index src1)
+{
+   cs_emit(b, LSHIFT64, I) {
+      I.destination = cs_dst64(b, dest);
+      I.source_0 = cs_src64(b, src0);
+      I.source_1 = cs_src64(b, src1);
+   }
+}
+
+static inline void
+cs_rshift_imm_u64(struct cs_builder *b, struct cs_index dest,
+                  struct cs_index src, uint8_t imm)
+{
+   cs_emit(b, RSHIFT_IMM_U64, I) {
+      I.destination = cs_dst64(b, dest);
+      I.source = cs_src64(b, src);
+      I.shift_amount = imm;
+   }
+}
+
+static inline void
+cs_rshift_imm_s64(struct cs_builder *b, struct cs_index dest,
+                  struct cs_index src, int8_t imm)
+{
+   cs_emit(b, RSHIFT_IMM_S64, I) {
+      I.destination = cs_dst64(b, dest);
+      I.source = cs_src64(b, src);
+      I.shift_amount = imm;
+   }
+}
+
+
+static inline void
+cs_rshift_u64(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+              struct cs_index src1)
+{
+   cs_emit(b, RSHIFT_U64, I) {
+      I.destination = cs_dst64(b, dest);
+      I.source_0 = cs_src64(b, src0);
+      I.source_1 = cs_src64(b, src1);
+   }
+}
+
+static inline void
+cs_rshift_s64(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+              struct cs_index src1)
+{
+   cs_emit(b, RSHIFT_S64, I) {
+      I.destination = cs_dst64(b, dest);
+      I.source_0 = cs_src64(b, src0);
+      I.source_1 = cs_src64(b, src1);
+   }
+}
+
+/* reg64 * imm64 -> reg64 multiply */
+static inline void
+cs_umul64(struct cs_builder *b, struct cs_index dest, struct cs_index src,
+          uint64_t imm)
+{
+   /* src and dest registers must be different in order for the accumulation
+    * loop to work */
+   assert(memcmp(&dest, &src, sizeof(dest)) != 0);
+
+   if (imm == 0) {
+      cs_move64_to(b, dest, 0);
+      return;
+   }
+
+   /* Reverse bitscan */
+   bool first = true;
+   while (imm != 0) {
+      unsigned bit = util_last_bit64(imm) - 1;
+      imm &= ~(1 << bit);
+      unsigned next_bit = util_last_bit64(imm) == 0 ?
+         0 : util_last_bit64(imm) - 1;
+
+      if (first) {
+         cs_lshift_imm64(b, dest, src, bit - next_bit);
+         first = false;
+      } else {
+         cs_add64(b, dest, dest, src);
+         if (bit - next_bit > 0)
+            cs_lshift_imm64(b, dest, dest, bit - next_bit);
+      }
+   }
+}
+
+/* Needs 4 scratch registers */
+static inline void
+cs_udiv32(struct cs_builder *b, struct cs_index dest, struct cs_index src,
+          uint32_t imm, struct cs_index scratch)
+{
+   assert(scratch.size >= 4);
+   assert(imm != 0);
+
+   /* Fast path for power-of-two divisors */
+   if (util_is_power_of_two_nonzero(imm)) {
+      cs_rshift_imm_u32(b, dest, src, util_logbase2(imm));
+      return;
+   }
+
+   struct util_fast_udiv_info info = util_compute_fast_udiv_info(imm, 32, 32);
+
+   struct cs_index mul_src = cs_extract64(b, scratch, 0);
+   struct cs_index mul_src_lo = cs_extract32(b, scratch, 0);
+   struct cs_index mul_src_hi = cs_extract32(b, scratch, 1);
+
+   struct cs_index mul_dest = cs_extract64(b, scratch, 2);
+   struct cs_index mul_dest_hi = cs_extract32(b, mul_dest, 1);
+
+   if (info.pre_shift)
+      cs_rshift_imm_u32(b, mul_src_lo, src, info.pre_shift);
+
+   if (info.increment != 0)
+      cs_add_imm32(b, mul_src_lo, info.pre_shift ? mul_src_lo : src,
+                   info.increment);
+
+   if (!info.pre_shift && !(info.increment != 0))
+      cs_move_reg32(b, mul_src_lo, src);
+   cs_move32_to(b, mul_src_hi, 0);
+
+   cs_umul64(b, mul_dest, mul_src, info.multiplier);
+
+   /* (mul_dest << 32) implemented by taking the high register */
+
+   cs_rshift_imm_u32(b, dest, mul_dest_hi, info.post_shift);
 }
 #endif
 
@@ -2224,7 +2479,7 @@ cs_match_case(struct cs_builder *b, struct cs_match *match, uint32_t id)
    }
 
    if (id)
-      cs_add32(b, match->scratch_reg, match->val, -id);
+      cs_add_imm32(b, match->scratch_reg, match->val, -id);
 
    cs_branch_label(b, &match->next_case_label, MALI_CS_CONDITION_NEQUAL,
                    id ? match->scratch_reg : match->val);
@@ -2302,11 +2557,47 @@ cs_match_end(struct cs_builder *b, struct cs_match *match)
         });                                                                    \
         !__default_defined; __default_defined = true)
 
+#define CS_DBG_STR_MAX_LEN 256
+#define CS_NOP_CHAR_COUNT  48 / 8
+
+enum cs_nop_type {
+   CS_NOP_TYPE_NOP = 0,
+   CS_NOP_TYPE_DBG_STR_START = 1,
+   CS_NOP_TYPE_DBG_STR_BUF = 2,
+};
+
 static inline void
-cs_nop(struct cs_builder *b)
+cs_nop(struct cs_builder *b, enum cs_nop_type type, uint64_t payload)
 {
-   cs_emit(b, NOP, I)
-      ;
+   assert(type != CS_NOP_TYPE_NOP || payload == 0);
+   assert((payload & BITFIELD64_RANGE(48, 12)) == 0);
+
+   cs_emit(b, NOP, I) {
+      I.metadata_payload = payload;
+      I.metadata_type = type;
+   }
+}
+
+/* Encode a string that is visible to dump/trace
+ * For formatting, see panvk_cmd_buffer.h:cs_debug_string */
+static inline void
+cs_dbg_str(struct cs_builder *b, const char *str)
+{
+   const uint32_t str_len = strlen(str);
+   assert(str_len < CS_DBG_STR_MAX_LEN);
+
+   cs_nop(b, CS_NOP_TYPE_DBG_STR_START, str_len);
+   const uint32_t buf_nops_len = DIV_ROUND_UP(str_len, CS_NOP_CHAR_COUNT);
+   for (uint32_t buf_nop_index = 0; buf_nop_index < buf_nops_len;
+        buf_nop_index++) {
+      const uint32_t slice_start = buf_nop_index * CS_NOP_CHAR_COUNT;
+      const uint32_t slice_end = MIN2(slice_start + CS_NOP_CHAR_COUNT, str_len);
+
+      uint64_t str_slice_payload = 0;
+      memcpy(&str_slice_payload, &str[slice_start], slice_end - slice_start);
+
+      cs_nop(b, CS_NOP_TYPE_DBG_STR_BUF, str_slice_payload);
+   }
 }
 
 struct cs_function_ctx {
@@ -2451,7 +2742,7 @@ cs_function_end(struct cs_builder *b,
 
    /* Fill the rest of the buffer with NOPs. */
    for (; num_instrs < padded_num_instrs; num_instrs++)
-      cs_nop(b);
+      cs_nop(b, CS_NOP_TYPE_NOP, 0);
 
    function->length = padded_num_instrs;
 }
@@ -2481,7 +2772,7 @@ cs_trace_preamble(struct cs_builder *b, const struct cs_tracing_ctx *ctx,
     * access. Use cs_trace_field_offset() to get an offset taking this
     * pre-increment into account. */
    cs_load64_to(b, tracebuf_addr, ctx->ctx_reg, ctx->tracebuf_addr_offset);
-   cs_add64(b, tracebuf_addr, tracebuf_addr, trace_size);
+   cs_add_imm64(b, tracebuf_addr, tracebuf_addr, trace_size);
    cs_store64(b, tracebuf_addr, ctx->ctx_reg, ctx->tracebuf_addr_offset);
    cs_flush_stores(b);
 }
@@ -2826,11 +3117,11 @@ cs_single_link_list_add_tail(struct cs_builder *b, struct cs_index list_base,
    /* If the list is empty (head == NULL), set the head, otherwise append to the
     * last node. */
    cs_if(b, MALI_CS_CONDITION_EQUAL, head)
-      cs_add64(b, head, new_node_gpu, 0);
+      cs_add_imm64(b, head, new_node_gpu, 0);
    cs_else(b)
       cs_store64(b, new_node_gpu, tail, offset_next);
 
-   cs_add64(b, tail, new_node_gpu, 0);
+   cs_add_imm64(b, tail, new_node_gpu, 0);
    cs_store(b, head_tail, list_base, BITFIELD_MASK(4), list_offset);
    cs_flush_stores(b);
 }

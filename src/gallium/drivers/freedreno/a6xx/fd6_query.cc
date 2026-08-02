@@ -300,7 +300,7 @@ time_elapsed_pause(struct fd_acc_query *aq, struct fd_batch *batch) assert_dt
 
    fd6_record_ts<CHIP>(cs, query_sample(aq, stop));
 
-   fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
+   emit_counter_barrier<CHIP>(cs);
 
    /* result += stop - start: */
    fd_pkt7(cs, CP_MEM_TO_MEM, 9)
@@ -824,6 +824,7 @@ static const struct fd_acc_sample_provider so_overflow_predicate = {
 struct fd_batch_query_entry {
    uint8_t gid; /* group-id */
    uint8_t cid; /* countable-id within the group */
+   const struct fd_perfcntr_counter *counter;
 };
 
 struct fd_batch_query_data {
@@ -832,6 +833,7 @@ struct fd_batch_query_data {
    struct fd_batch_query_entry query_entries[];
 };
 
+template <chip CHIP>
 static void
 perfcntr_resume(struct fd_acc_query *aq, struct fd_batch *batch) assert_dt
 {
@@ -839,33 +841,32 @@ perfcntr_resume(struct fd_acc_query *aq, struct fd_batch *batch) assert_dt
    struct fd_screen *screen = data->screen;
    fd_cs cs(batch->draw);
 
-   unsigned counters_per_group[screen->num_perfcntr_groups];
-   memset(counters_per_group, 0, sizeof(counters_per_group));
-
-   fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
+   emit_counter_barrier<CHIP>(cs);
 
    /* configure performance counters for the requested queries: */
    for (unsigned i = 0; i < data->num_query_entries; i++) {
       struct fd_batch_query_entry *entry = &data->query_entries[i];
       const struct fd_perfcntr_group *g = &screen->perfcntr_groups[entry->gid];
-      unsigned counter_idx = counters_per_group[entry->gid]++;
-
-      assert(counter_idx < g->num_counters);
 
       fd_pkt4(cs, 1).add((fd_reg_pair){
-         .reg = g->counters[counter_idx].select_reg,
+         .reg = entry->counter->select_reg,
          .value = g->countables[entry->cid].selector,
       });
-   }
 
-   memset(counters_per_group, 0, sizeof(counters_per_group));
+      for (unsigned s = 0; s < ARRAY_SIZE(entry->counter->slice_select_regs); s++) {
+         if (!entry->counter->slice_select_regs[s])
+            break;
+         fd_pkt4(cs, 1).add((fd_reg_pair){
+            .reg = entry->counter->slice_select_regs[s],
+            .value = g->countables[entry->cid].selector,
+         });
+      }
+   }
 
    /* and snapshot the start values */
    for (unsigned i = 0; i < data->num_query_entries; i++) {
       struct fd_batch_query_entry *entry = &data->query_entries[i];
-      const struct fd_perfcntr_group *g = &screen->perfcntr_groups[entry->gid];
-      unsigned counter_idx = counters_per_group[entry->gid]++;
-      const struct fd_perfcntr_counter *counter = &g->counters[counter_idx];
+      const struct fd_perfcntr_counter *counter = entry->counter;
 
       fd_pkt7(cs, CP_REG_TO_MEM, 3)
          .add(CP_REG_TO_MEM_0(.reg = counter->counter_reg_lo, ._64b = true))
@@ -873,26 +874,21 @@ perfcntr_resume(struct fd_acc_query *aq, struct fd_batch *batch) assert_dt
    }
 }
 
+template <chip CHIP>
 static void
 perfcntr_pause(struct fd_acc_query *aq, struct fd_batch *batch) assert_dt
 {
    struct fd_batch_query_data *data = (struct fd_batch_query_data *)aq->query_data;
-   struct fd_screen *screen = data->screen;
    fd_cs cs(batch->draw);
 
-   unsigned counters_per_group[screen->num_perfcntr_groups];
-   memset(counters_per_group, 0, sizeof(counters_per_group));
-
-   fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
+   emit_counter_barrier<CHIP>(cs);
 
    /* TODO do we need to bother to turn anything off? */
 
    /* snapshot the end values: */
    for (unsigned i = 0; i < data->num_query_entries; i++) {
       struct fd_batch_query_entry *entry = &data->query_entries[i];
-      const struct fd_perfcntr_group *g = &screen->perfcntr_groups[entry->gid];
-      unsigned counter_idx = counters_per_group[entry->gid]++;
-      const struct fd_perfcntr_counter *counter = &g->counters[counter_idx];
+      const struct fd_perfcntr_counter *counter = entry->counter;
 
       fd_pkt7(cs, CP_REG_TO_MEM, 3)
          .add(CP_REG_TO_MEM_0(.reg = counter->counter_reg_lo, ._64b = true))
@@ -925,14 +921,28 @@ perfcntr_accumulate_result(struct fd_acc_query *aq,
    }
 }
 
+static void
+perfcntr_cleanup(void *query_data)
+{
+   struct fd_batch_query_data *data = (struct fd_batch_query_data *)query_data;
+
+   for (unsigned i = 0; i < data->num_query_entries; i++) {
+      struct fd_batch_query_entry *entry = &data->query_entries[i];
+      fd_perfcntr_release(data->screen->perfcntrs, entry->counter);
+   }
+}
+
+template <chip CHIP>
 static const struct fd_acc_sample_provider perfcntr = {
    .query_type = FD_QUERY_FIRST_PERFCNTR,
    .always = true,
-   .resume = perfcntr_resume,
-   .pause = perfcntr_pause,
+   .resume = perfcntr_resume<CHIP>,
+   .pause = perfcntr_pause<CHIP>,
    .result = perfcntr_accumulate_result,
+   .cleanup = perfcntr_cleanup,
 };
 
+template <chip CHIP>
 static struct pipe_query *
 fd6_create_batch_query(struct pipe_context *pctx, unsigned num_queries,
                        unsigned *query_types)
@@ -948,13 +958,6 @@ fd6_create_batch_query(struct pipe_context *pctx, unsigned num_queries,
 
    data->screen = screen;
    data->num_query_entries = num_queries;
-
-   /* validate the requested query_types and ensure we don't try
-    * to request more query_types of a given group than we have
-    * counters:
-    */
-   unsigned counters_per_group[screen->num_perfcntr_groups];
-   memset(counters_per_group, 0, sizeof(counters_per_group));
 
    for (unsigned i = 0; i < num_queries; i++) {
       unsigned idx = query_types[i] - FD_QUERY_FIRST_PERFCNTR;
@@ -985,16 +988,18 @@ fd6_create_batch_query(struct pipe_context *pctx, unsigned num_queries,
             entry->cid++;
       }
 
-      if (counters_per_group[entry->gid] >=
-          screen->perfcntr_groups[entry->gid].num_counters) {
-         mesa_loge("too many counters for group %u", entry->gid);
+      const struct fd_perfcntr_group *g = &screen->perfcntr_groups[entry->gid];
+      const struct fd_perfcntr_countable *c = &g->countables[entry->cid];
+
+      entry->counter = fd_perfcntr_reserve(screen->perfcntrs, g, c);
+
+      if (!entry->counter) {
+         mesa_loge("Could not reserve counter for %s.%s", g->name, c->name);
          goto error;
       }
-
-      counters_per_group[entry->gid]++;
    }
 
-   q = fd_acc_create_query2(ctx, 0, 0, &perfcntr);
+   q = fd_acc_create_query2(ctx, 0, 0, &perfcntr<CHIP>);
    aq = fd_acc_query(q);
 
    /* sample buffer size is based on # of queries: */
@@ -1004,6 +1009,7 @@ fd6_create_batch_query(struct pipe_context *pctx, unsigned num_queries,
    return (struct pipe_query *)q;
 
 error:
+   perfcntr_cleanup(data);
    free(data);
    return NULL;
 }
@@ -1020,7 +1026,7 @@ fd6_query_context_init(struct pipe_context *pctx) disable_thread_safety_analysis
    ctx->record_timestamp = record_timestamp<CHIP>;
    ctx->ts_to_ns = ticks_to_ns;
 
-   pctx->create_batch_query = fd6_create_batch_query;
+   pctx->create_batch_query = fd6_create_batch_query<CHIP>;
 
    fd_acc_query_register_provider(pctx, &occlusion_counter<CHIP>);
    fd_acc_query_register_provider(pctx, &occlusion_predicate<CHIP>);

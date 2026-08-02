@@ -17,6 +17,7 @@
 #include "radv_cs.h"
 #include "radv_device_memory.h"
 #include "radv_image.h"
+#include "vk_common_entrypoints.h"
 #include "vk_semaphore.h"
 #include "vk_sync.h"
 
@@ -245,6 +246,7 @@ radv_set_ring_buffer(const struct radv_physical_device *pdev, struct radeon_wins
       .index_stride = index_stride,
       .add_tid = add_tid,
       .gfx10_oob_select = oob_select,
+      .has_desc_resource_level = pdev->info.compiler_info.has_desc_resource_level,
    };
 
    ac_build_buffer_descriptor(pdev->info.gfx_level, &ac_state, desc);
@@ -332,8 +334,9 @@ radv_fill_shader_rings(struct radv_device *device, uint32_t *desc, struct radeon
    if (ge_rings_bo) {
       assert(pdev->info.gfx_level >= GFX11);
 
-      ac_build_attr_ring_descriptor(pdev->info.gfx_level, radv_buffer_get_va(ge_rings_bo),
-                                    pdev->info.total_attribute_pos_prim_ring_size, 0, &desc[0]);
+      ac_build_attr_ring_descriptor(pdev->info.gfx_level, pdev->info.compiler_info.has_desc_resource_level,
+                                    radv_buffer_get_va(ge_rings_bo), pdev->info.total_attribute_pos_prim_ring_size, 0,
+                                    &desc[0]);
    }
 
    desc += 4;
@@ -478,7 +481,6 @@ radv_emit_compute_scratch(struct radv_device *device, struct radv_cmd_stream *cs
    const struct radeon_info *gpu_info = &pdev->info;
    uint32_t tmpring_size;
    uint64_t scratch_va;
-   uint32_t rsrc1;
 
    /* Ensure there is always a mapped BO in s[0:1] for the SMEM OOB mitigation */
    if (!compute_scratch_bo && device->compiler_info.key.mitigate_smem_oob)
@@ -488,12 +490,6 @@ radv_emit_compute_scratch(struct radv_device *device, struct radv_cmd_stream *cs
       return;
 
    scratch_va = radv_buffer_get_va(compute_scratch_bo);
-   rsrc1 = S_008F04_BASE_ADDRESS_HI(scratch_va >> 32);
-
-   if (gpu_info->gfx_level >= GFX11)
-      rsrc1 |= S_008F04_SWIZZLE_ENABLE_GFX11(1);
-   else
-      rsrc1 |= S_008F04_SWIZZLE_ENABLE_GFX6(1);
 
    ac_get_scratch_tmpring_size(gpu_info, waves, size_per_wave, &tmpring_size);
 
@@ -502,16 +498,18 @@ radv_emit_compute_scratch(struct radv_device *device, struct radv_cmd_stream *cs
    radeon_begin(cs);
 
    if (gpu_info->gfx_level >= GFX11) {
+      assert(!device->compiler_info.key.mitigate_smem_oob);
+
       radeon_set_sh_reg_seq(R_00B840_COMPUTE_DISPATCH_SCRATCH_BASE_LO, 2);
       radeon_emit(scratch_va >> 8);
       radeon_emit(scratch_va >> 40);
+   } else {
+      uint32_t rsrc1 = S_008F04_BASE_ADDRESS_HI(scratch_va >> 32) | S_008F04_SWIZZLE_ENABLE_GFX6(1);
 
-      waves /= gpu_info->max_se;
+      radeon_set_sh_reg_seq(R_00B900_COMPUTE_USER_DATA_0, 2);
+      radeon_emit(scratch_va);
+      radeon_emit(rsrc1);
    }
-
-   radeon_set_sh_reg_seq(R_00B900_COMPUTE_USER_DATA_0, 2);
-   radeon_emit(scratch_va);
-   radeon_emit(rsrc1);
 
    radeon_set_sh_reg(R_00B860_COMPUTE_TMPRING_SIZE, tmpring_size);
 
@@ -522,6 +520,8 @@ static void
 radv_emit_compute_shader_pointers(struct radv_device *device, struct radv_cmd_stream *cs,
                                   struct radeon_winsys_bo *descriptor_bo)
 {
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
    if (!descriptor_bo)
       return;
 
@@ -532,7 +532,10 @@ radv_emit_compute_shader_pointers(struct radv_device *device, struct radv_cmd_st
     * so emit the descriptor pointer to user data 2-3 instead (task_ring_offsets arg).
     */
    radeon_begin(cs);
-   radeon_emit_64bit_pointer(R_00B908_COMPUTE_USER_DATA_2, va);
+   if (pdev->info.gfx_level >= GFX11)
+      radeon_emit_64bit_pointer(R_00B900_COMPUTE_USER_DATA_0, va);
+   else
+      radeon_emit_64bit_pointer(R_00B908_COMPUTE_USER_DATA_2, va);
    radeon_end();
 }
 
@@ -657,9 +660,16 @@ radv_emit_compute(struct radv_device *device, struct radv_cmd_stream *cs, bool i
       ac_pm4_set_reg(pm4, R_00B844_COMPUTE_TMA_HI, tma_va >> 40);
    }
 
-   if (pdev->info.gfx_level >= GFX12)
-      ac_pm4_set_reg(pm4, R_00B8BC_COMPUTE_DISPATCH_INTERLEAVE,
-                     S_00B8BC_INTERLEAVE_1D(preamble_state.gfx11.compute_dispatch_interleave));
+   if (pdev->info.gfx_level >= GFX12) {
+      if (is_compute_queue) {
+         ac_pm4_set_reg(pm4, R_00B8BC_COMPUTE_DISPATCH_INTERLEAVE,
+                        S_00B8BC_INTERLEAVE_1D(preamble_state.gfx11.compute_dispatch_interleave));
+      } else {
+         ac_pm4_set_reg_custom(pm4, R_00B8BC_COMPUTE_DISPATCH_INTERLEAVE - SI_SH_REG_OFFSET,
+                               S_00B8BC_INTERLEAVE_1D(preamble_state.gfx11.compute_dispatch_interleave),
+                               PKT3_SET_SH_REG_INDEX, 2);
+      }
+   }
 
    ac_pm4_finalize(pm4);
    ac_pm4_emit_commands(cs->b, pm4);
@@ -719,19 +729,6 @@ radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs)
    if (pdev->info.gfx_level < GFX11)
       ac_pm4_set_reg(pm4, R_00B124_SPI_SHADER_PGM_HI_VS, S_00B124_MEM_BASE(pdev->info.address32_hi >> 8));
 
-   unsigned cu_mask_ps = pdev->info.gfx_level >= GFX10_3 ? ac_gfx103_get_cu_mask_ps(&pdev->info) : ~0u;
-
-   if (pdev->info.gfx_level >= GFX12) {
-      ac_pm4_set_reg(pm4, R_00B420_SPI_SHADER_PGM_RSRC4_HS, S_00B420_WAVE_LIMIT(0x3ff) | S_00B420_GLG_FORCE_DISABLE(1));
-      ac_pm4_set_reg(pm4, R_00B01C_SPI_SHADER_PGM_RSRC4_PS,
-                     S_00B01C_WAVE_LIMIT_GFX12(0x3FF) | S_00B01C_LDS_GROUP_SIZE_GFX12(1));
-   } else if (pdev->info.gfx_level >= GFX11) {
-      ac_pm4_set_reg_idx3(pm4, R_00B404_SPI_SHADER_PGM_RSRC4_HS,
-                          ac_apply_cu_en(S_00B404_CU_EN(0xffff), C_00B404_CU_EN, 16, &pdev->info));
-      ac_pm4_set_reg_idx3(pm4, R_00B004_SPI_SHADER_PGM_RSRC4_PS,
-                          ac_apply_cu_en(S_00B004_CU_EN(cu_mask_ps >> 16), C_00B004_CU_EN, 16, &pdev->info));
-   }
-
    if (pdev->info.gfx_level >= GFX10) {
       /* Vulkan doesn't support user edge flags and it also doesn't
        * need to prevent drawing lines on internal edges of
@@ -740,12 +737,6 @@ radv_emit_graphics(struct radv_device *device, struct radv_cmd_stream *cs)
       unsigned vertex_reuse_depth = pdev->info.gfx_level >= GFX10_3 ? 30 : 0;
       ac_pm4_set_reg(pm4, R_028838_PA_CL_NGG_CNTL,
                      S_028838_INDEX_BUF_EDGE_FLAG_ENA(0) | S_028838_VERTEX_REUSE_DEPTH(vertex_reuse_depth));
-
-      if (pdev->info.gfx_level >= GFX10_3) {
-         /* This allows sample shading. */
-         ac_pm4_set_reg(pm4, R_028848_PA_CL_VRS_CNTL,
-                        S_028848_SAMPLE_ITER_COMBINER_MODE(V_028848_SC_VRS_COMB_MODE_OVERRIDE));
-      }
    }
 
    unsigned tmp = (unsigned)(1.0 * 8.0);
@@ -1060,6 +1051,9 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
             radeon_end();
          }
 
+         if (mesh_scratch_ring_bo)
+            radv_cs_add_buffer(device->ws, cs->b, mesh_scratch_ring_bo);
+
          radv_emit_gs_ring_sizes(device, cs, esgs_ring_bo, needs->esgs_ring_size, gsvs_ring_bo, needs->gsvs_ring_size);
          radv_emit_tess_factor_ring(device, cs, tess_rings_bo);
          radv_emit_task_rings(device, cs, task_rings_bo, false);
@@ -1285,6 +1279,33 @@ radv_update_preambles(struct radv_queue_state *queue, struct radv_device *device
 /**
  * Creates a postamble CS that executes cache flush commands
  * that we can use at the end of each submission.
+ *
+ * GFX6:
+ * The kernel uses an EVENT_WRITE_EOP packet for signalling the
+ * fence after each submission. Due to a firmware bug, this
+ * packet can't wait for L2 writeback to finish, even with
+ * the INV_L2 bit set, because it doesn't properly program
+ * the CP_COHER_SIZE register.
+ * As a workaround, the kernel uses a SURFACE_SYNC before the
+ * fence. That has the side effect of flushing the L2 cache
+ * while shaders are still in flight, which is suboptimal,
+ * and is also incorrect as the shader may still write L2.
+ *
+ * GFX7:
+ * The kernel uses an EVENT_WRITE_EOP packet for signalling the
+ * fence after each submission. Due to a firmware bug, this
+ * packet can't wait for L2 writeback to finish. As a workaround,
+ * the kernel emits the EVENT_WRITE_EOP packet twice, but that
+ * may just reduce the likelihood of the issue and may not fully
+ * mitigate it.
+ * We see random hangs on Hawaii which can be solved by
+ * an L2 cache flush at the end of each submission.
+ * Let's also wait for shaders to finish to avoid flushing
+ * the cache while shaders are still in flight.
+ *
+ * Until we find a better way to mitigate the problems in the kernel,
+ * let's wait for shaders to finish and then do a full flush
+ * of all caches to be sure.
  */
 static VkResult
 radv_create_flush_postamble(struct radv_queue *queue)
@@ -1292,6 +1313,7 @@ radv_create_flush_postamble(struct radv_queue *queue)
    const struct radv_device *device = radv_queue_device(queue);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const enum amd_ip_type ip = radv_queue_family_to_ring(pdev, queue->state.qf);
+   const bool is_mec = ip == AMD_IP_COMPUTE && pdev->info.gfx_level >= GFX7;
    struct radeon_winsys *ws = device->ws;
    struct radv_cmd_stream *cs;
    VkResult result;
@@ -1302,22 +1324,38 @@ radv_create_flush_postamble(struct radv_queue *queue)
 
    radeon_check_space(ws, cs->b, 256);
 
-   const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
-   enum radv_cmd_flush_bits flush_bits = 0;
-
-   if (gfx_level == GFX6) {
-      /* GFX6: The kernel flushes L2 before shaders are finished. */
-      flush_bits = RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_WB_L2;
-      if (ip == AMD_IP_GFX)
-         flush_bits |= RADV_CMD_FLAG_PS_PARTIAL_FLUSH;
-   } else {
-      /* Improves stability on Hawaii. */
-      flush_bits =
-         RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_L2;
+   ac_cmdbuf_begin(cs->b);
+   if (ip == AMD_IP_GFX) {
+      ac_cmdbuf_event_write(V_028A90_VS_PARTIAL_FLUSH);
+      ac_cmdbuf_event_write(V_028A90_PS_PARTIAL_FLUSH);
+      ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_CB_META);
+      ac_cmdbuf_event_write(V_028A90_FLUSH_AND_INV_DB_META);
    }
+   ac_cmdbuf_event_write(V_028A90_CS_PARTIAL_FLUSH);
+   ac_cmdbuf_end();
 
-   enum rgp_flush_bits sqtt_flush_bits = 0;
-   radv_cs_emit_cache_flush(ws, cs, gfx_level, NULL, 0, flush_bits, &sqtt_flush_bits, 0);
+   if (!is_mec)
+      ac_emit_cp_pfp_sync_me(cs->b, false);
+
+   uint32_t cp_coher_cntl =
+      S_0085F0_TC_ACTION_ENA(1) |
+      S_0085F0_TCL1_ACTION_ENA(1);
+
+   if (ip == AMD_IP_GFX)
+      cp_coher_cntl |=
+         S_0085F0_CB_ACTION_ENA(1) |
+         S_0085F0_CB0_DEST_BASE_ENA(1) |
+         S_0085F0_CB1_DEST_BASE_ENA(1) |
+         S_0085F0_CB2_DEST_BASE_ENA(1) |
+         S_0085F0_CB3_DEST_BASE_ENA(1) |
+         S_0085F0_CB4_DEST_BASE_ENA(1) |
+         S_0085F0_CB5_DEST_BASE_ENA(1) |
+         S_0085F0_CB6_DEST_BASE_ENA(1) |
+         S_0085F0_CB7_DEST_BASE_ENA(1) |
+         S_0085F0_DB_ACTION_ENA(1) |
+         S_0085F0_DB_DEST_BASE_ENA(1);
+
+   ac_emit_cp_acquire_mem(cs->b, pdev->info.gfx_level, cs->hw_ip, V_581A_PREFETCH_PARSER, cp_coher_cntl);
 
    result = radv_finalize_cmd_stream(device, cs);
    if (result != VK_SUCCESS) {
@@ -1383,15 +1421,15 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
    if (r != VK_SUCCESS)
       goto fail;
 
-   radv_create_cmd_stream(device, ip, false, &leader_post_cs);
+   r = radv_create_cmd_stream(device, ip, false, &leader_post_cs);
    if (r != VK_SUCCESS)
       goto fail;
 
-   radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_pre_cs);
+   r = radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_pre_cs);
    if (r != VK_SUCCESS)
       goto fail;
 
-   radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_post_cs);
+   r = radv_create_cmd_stream(device, AMD_IP_COMPUTE, false, &ace_post_cs);
    if (r != VK_SUCCESS)
       goto fail;
 
@@ -1789,7 +1827,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
 
    queue->last_shader_upload_seq = MAX2(queue->last_shader_upload_seq, shader_upload_seq);
 
-   radv_dump_printf_data(device, stderr);
+   radv_dump_printf_data(device, stderr, true);
 
 fail:
    free(cs_array);
@@ -1950,6 +1988,19 @@ radv_queue_init(struct radv_device *device, struct radv_queue *queue, int idx,
    } else {
       queue->vk.driver_submit = radv_queue_submit;
    }
+
+   if (device->utrace.context) {
+      VkCommandPoolCreateInfo pool_info = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+         .queueFamilyIndex = queue->vk.queue_family_index,
+      };
+
+      result =
+         vk_common_CreateCommandPool(radv_device_to_handle(device), &pool_info, NULL, &queue->utrace_command_pool);
+      if (result != VK_SUCCESS)
+         goto fail;
+   }
+
    return VK_SUCCESS;
 fail:
    vk_queue_finish(&queue->vk);
@@ -2020,6 +2071,8 @@ void
 radv_queue_finish(struct radv_queue *queue)
 {
    struct radv_device *device = radv_queue_device(queue);
+
+   vk_common_DestroyCommandPool(radv_device_to_handle(device), queue->utrace_command_pool, NULL);
 
    if (queue->follower_state) {
       /* Prevent double free */

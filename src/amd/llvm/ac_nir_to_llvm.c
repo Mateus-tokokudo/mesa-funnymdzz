@@ -931,9 +931,6 @@ static bool visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
    case nir_op_b2b1: /* after loads */
       result = emit_i2b(&ctx->ac, src[0]);
       break;
-   case nir_op_b2b16: /* before stores */
-      result = LLVMBuildZExt(ctx->ac.builder, src[0], ctx->ac.i16, "");
-      break;
    case nir_op_b2b32: /* before stores */
       result = LLVMBuildZExt(ctx->ac.builder, src[0], ctx->ac.i32, "");
       break;
@@ -2022,7 +2019,7 @@ static LLVMValueRef visit_load_ubo_buffer(struct ac_nir_context *ctx, nir_intrin
 
 static void visit_store_output(struct ac_nir_context *ctx, nir_intrinsic_instr *instr)
 {
-   nir_shader *nir = nir_cf_node_get_function(&instr->instr.block->cf_node)->function->shader;
+   nir_shader *nir = instr->instr.block->impl->function->shader;
    unsigned base = ac_nir_get_io_driver_location(nir, nir_intrinsic_io_semantics(instr).location, false);
    unsigned writemask = nir_intrinsic_write_mask(instr);
    unsigned component = nir_intrinsic_component(instr);
@@ -2467,7 +2464,7 @@ static void emit_demote(struct ac_nir_context *ctx, const nir_intrinsic_instr *i
 
 static LLVMValueRef visit_first_invocation(struct ac_nir_context *ctx)
 {
-   LLVMValueRef active_set = ac_build_ballot(&ctx->ac, ctx->ac.i32_1);
+   LLVMValueRef active_set = ac_build_ballot(&ctx->ac, ctx->ac.i1true);
    const char *intr = ctx->ac.wave_size == 32 ? "llvm.cttz.i32" : "llvm.cttz.i64";
 
    /* The second argument is whether cttz(0) should be defined, but we do not care. */
@@ -2855,7 +2852,7 @@ static bool visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
       } else {
          LLVMValueRef src = get_src(ctx, instr->src[0]);
          LLVMValueRef index = get_src(ctx, instr->src[1]);
-         LLVMValueRef active = ac_build_ballot(&ctx->ac, ctx->ac.i32_1);
+         LLVMValueRef active = ac_build_ballot(&ctx->ac, ctx->ac.i1true);
          LLVMValueRef undef = LLVMGetUndef(LLVMTypeOf(src));
 
          LLVMBasicBlockRef preheader = LLVMGetInsertBlock(ctx->ac.builder);
@@ -3130,6 +3127,7 @@ static bool visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
       break;
    }
    case nir_intrinsic_load_scalar_arg_amd:
+   case nir_intrinsic_load_scalar_arg_wg_div_amd:
    case nir_intrinsic_load_vector_arg_amd: {
       assert(nir_intrinsic_base(instr) < AC_MAX_ARGS);
       struct ac_arg arg;

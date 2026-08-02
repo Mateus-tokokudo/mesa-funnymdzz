@@ -410,17 +410,18 @@ radv_ps_needs_state_sgpr(const struct radv_shader_info *info, const struct radv_
    if (info->ps.needs_sample_positions && gfx_state->dynamic_rasterization_samples)
       return true;
 
-   if (gfx_state->dynamic_line_rast_mode)
+   if (info->ps.needs_poly_line_smooth)
       return true;
 
    if (info->ps.reads_sample_mask_in && (info->ps.uses_sample_shading || gfx_state->ms.sample_shading_enable))
       return true;
 
    /* For computing barycentrics when the primitive topology is unknown at compile time (GPL). */
-   if (info->ps.load_rasterization_prim && gfx_state->unknown_rast_prim)
+   if (info->ps.load_rasterization_prim)
       return true;
 
-   if (info->ps.selects_frag_coord_xy_dynamically)
+   if (info->ps.selects_frag_coord_xy_dynamically || info->ps.selects_quad_pos_dynamically ||
+       info->ps.selects_sample_mask_in_dynamically || info->ps.selects_front_face_dynamically)
       return true;
 
    return false;
@@ -596,7 +597,9 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
       return;
    }
 
-   RADV_ADD_UD_ARG(state, 2, AC_ARG_CONST_ADDR, ac.ring_offsets, AC_UD_SCRATCH_RING_OFFSETS);
+   if (gfx_level < GFX11 || (stage != MESA_SHADER_COMPUTE && stage != MESA_SHADER_TASK)) {
+      RADV_ADD_UD_ARG(state, 2, AC_ARG_CONST_ADDR, ac.ring_offsets, AC_UD_SCRATCH_RING_OFFSETS);
+   }
    if (stage == MESA_SHADER_TASK) {
       RADV_ADD_UD_ARG(state, 2, AC_ARG_CONST_ADDR, task_ring_offsets, AC_UD_CS_TASK_RING_OFFSETS);
    }
@@ -892,6 +895,9 @@ declare_shader_args(const struct radv_compiler_info *compiler_info, struct radv_
       if (radv_ps_needs_state_sgpr(info, gfx_state))
          RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ps_state, AC_UD_PS_STATE);
 
+      if (info->uses_view_index)
+         RADV_ADD_UD_ARG(state, 1, AC_ARG_VALUE, ac.view_index, AC_UD_VIEW_INDEX);
+
       RADV_ADD_ARG(state, AC_ARG_SGPR, 1, AC_ARG_VALUE, ac.prim_mask);
 
       if (info->ps.pops && gfx_level < GFX11) {
@@ -965,18 +971,20 @@ radv_gather_shader_args_debug_info(struct radv_shader_args_state *state, struct 
 
 void
 radv_declare_shader_args(const struct radv_compiler_info *compiler_info,
-                         const struct radv_graphics_state_key *gfx_state, const struct radv_shader_info *info,
-                         mesa_shader_stage stage, mesa_shader_stage previous_stage, struct radv_shader_args *args,
-                         struct radv_shader_debug_info *debug)
+                         const struct radv_graphics_state_key *gfx_state, struct radv_shader_stage *stage,
+                         mesa_shader_stage previous_stage, struct radv_shader_debug_info *debug)
 {
+   const struct radv_shader_info *info = &stage->info;
+   struct radv_shader_args *args = &stage->args;
+
    struct radv_shader_args_state state = {
       .args = args,
    };
 
    struct user_sgpr_info user_sgpr_info = {0};
 
-   if (!mesa_shader_stage_is_rt(stage)) {
-      declare_shader_args(compiler_info, &state, gfx_state, info, stage, previous_stage, NULL);
+   if (!mesa_shader_stage_is_rt(stage->stage)) {
+      declare_shader_args(compiler_info, &state, gfx_state, info, stage->stage, previous_stage, NULL);
 
       uint32_t num_user_sgprs = args->num_user_sgprs;
       if (info->loads_push_constants)
@@ -989,7 +997,7 @@ radv_declare_shader_args(const struct radv_compiler_info *compiler_info,
 
       const enum amd_gfx_level gfx_level = compiler_info->ac->gfx_level;
       uint32_t available_sgprs =
-         gfx_level >= GFX9 && stage != MESA_SHADER_COMPUTE && stage != MESA_SHADER_TASK ? 32 : 16;
+         gfx_level >= GFX9 && stage->stage != MESA_SHADER_COMPUTE && stage->stage != MESA_SHADER_TASK ? 32 : 16;
       uint32_t remaining_sgprs = available_sgprs - num_user_sgprs;
 
       user_sgpr_info.remaining_sgprs = remaining_sgprs;
@@ -1012,13 +1020,13 @@ radv_declare_shader_args(const struct radv_compiler_info *compiler_info,
          allocate_inline_push_consts(info, &user_sgpr_info);
    }
 
-   state.gather_debug_info = debug && compiler_info->debug.keep_shader_info;
+   state.gather_debug_info = stage->key.keep_shader_arg_info;
    if (state.gather_debug_info) {
       state.ctx = ralloc_context(NULL);
       state.gather_debug_info &= !!state.ctx;
    }
 
-   declare_shader_args(compiler_info, &state, gfx_state, info, stage, previous_stage, &user_sgpr_info);
+   declare_shader_args(compiler_info, &state, gfx_state, info, stage->stage, previous_stage, &user_sgpr_info);
 
    if (state.gather_debug_info)
       radv_gather_shader_args_debug_info(&state, debug);

@@ -48,6 +48,33 @@ unsigned si_vid_alloc_stream_handle()
    return ac_uvd_alloc_stream_handle(&stream_handle);
 }
 
+struct si_resource *si_vid_create_buffer(struct pipe_screen *screen,
+                                         enum pipe_resource_usage usage,
+                                         unsigned flags, unsigned size)
+{
+   struct si_screen *sscreen = (struct si_screen *)screen;
+   unsigned bind = 0;
+
+   /* Disable suballocation for UVD/VCE with no VM support */
+   if (sscreen->info.family < CHIP_STONEY)
+      bind |= PIPE_BIND_CUSTOM;
+
+   if (flags & PIPE_RESOURCE_FLAG_ENCRYPTED)
+      bind |= PIPE_BIND_PROTECTED;
+
+   return si_resource(screen->resource_create(screen, &(struct pipe_resource){
+      .width0 = size,
+      .height0 = 1,
+      .depth0 = 1,
+      .array_size = 1,
+      .format = PIPE_FORMAT_R8_UNORM,
+      .target = PIPE_BUFFER,
+      .usage = usage,
+      .bind = bind,
+      .flags = flags,
+   }));
+}
+
 bool si_vid_resize_buffer(struct pipe_context *context,
                           struct si_resource **buf, unsigned new_size)
 {
@@ -59,7 +86,8 @@ bool si_vid_resize_buffer(struct pipe_context *context,
    struct si_resource *old_buf = new_buf;
    void *src = NULL, *dst = NULL;
 
-   new_buf = si_resource(pipe_buffer_create(context->screen, old_buf->b.b.bind, old_buf->b.b.usage, new_size));
+   new_buf = si_vid_create_buffer(context->screen, old_buf->b.b.usage,
+                                  old_buf->b.b.flags, new_size);
    if (!new_buf)
       goto error;
 

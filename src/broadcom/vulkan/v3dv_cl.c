@@ -49,7 +49,7 @@ v3dv_cl_destroy(struct v3dv_cl *cl)
    list_for_each_entry_safe(struct v3dv_bo, bo, &cl->bo_list, list_link) {
       assert(cl->job);
       list_del(&bo->list_link);
-      v3dv_bo_free(cl->job->device, bo);
+      v3dv_bo_free(cl->job->device, bo, 0);
    }
 
    /* Leave the CL in a reset state to catch use after destroy instances */
@@ -95,7 +95,9 @@ cl_alloc_bo(struct v3dv_cl *cl, uint32_t space, enum
    if (cl->bo)
       space = MAX2(cl->bo->size * 2, space);
 
-   struct v3dv_bo *bo = v3dv_bo_alloc(cl->job->device, space, "CL", true);
+   struct v3dv_bo *bo = v3dv_bo_alloc(cl->job->device, space, "CL", true,
+                                      VK_OBJECT_TYPE_COMMAND_BUFFER,
+                                      job_get_cmd_buffer_vk_handle(cl->job));
    if (!bo) {
       mesa_loge("failed to allocate memory for command list\n");
       v3dv_flag_oom(NULL, cl->job);

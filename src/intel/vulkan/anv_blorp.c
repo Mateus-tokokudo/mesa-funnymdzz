@@ -99,7 +99,7 @@ upload_dynamic_state(struct blorp_context *context,
    struct anv_device *device = context->driver_ctx;
 
    device->blorp.dynamic_states[name] =
-      anv_state_pool_emit_data(&device->dynamic_state_pool,
+      anv_state_pool_emit_data(anv_device_get_dynamic_state_pool(device),
                                size, alignment, data);
 }
 
@@ -152,7 +152,7 @@ anv_device_finish_blorp(struct anv_device *device)
     * BO will go away in a couple of lines so we don't actually leak.
     */
    for (uint32_t i = 0; i < ARRAY_SIZE(device->blorp.dynamic_states); i++) {
-      anv_state_pool_free(&device->dynamic_state_pool,
+      anv_state_pool_free(anv_device_get_dynamic_state_pool(device),
                           device->blorp.dynamic_states[i]);
    }
 #endif
@@ -545,6 +545,17 @@ is_image_emulated(const struct anv_image *image)
 }
 
 static bool
+is_image_zcs_compressed(const struct anv_image *image)
+{
+   if (!(image->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT))
+      return false;
+
+   const uint32_t plane =
+      anv_image_aspect_to_plane(image, VK_IMAGE_ASPECT_DEPTH_BIT);
+   return image->planes[plane].aux_usage == ISL_AUX_USAGE_ZCS;
+}
+
+static bool
 is_image_hiz_compressed(const struct anv_image *image)
 {
    if (!(image->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT))
@@ -639,8 +650,10 @@ anv_blorp_execute_on_companion(struct anv_cmd_buffer *cmd_buffer,
       if ((intel_needs_workaround(devinfo, 22019225126) ||
            devinfo->verx10 == 125) &&
           ((src_image && (is_image_stc_ccs_compressed(src_image) ||
+                          is_image_zcs_compressed(src_image) ||
                           is_image_hiz_compressed(src_image))) ||
            (dst_image && (is_image_stc_ccs_compressed(dst_image) ||
+                          is_image_zcs_compressed(dst_image) ||
                           is_image_hiz_compressed(dst_image)))))
          return true;
    }
@@ -651,11 +664,13 @@ anv_blorp_execute_on_companion(struct anv_cmd_buffer *cmd_buffer,
    if (src_image && is_image_hiz_non_wt_ccs_compressed(src_image))
       return true;
 
-   /* Pre Gfx20 the only engine that can generate STC_CCS data is RCS through
-    * the stencil output due to the difference in compression pairing bit. On
-    * Gfx20 there is no difference.
+   /* Pre Gfx20 the only engine that can generate ZCS/STC_CCS data is RCS
+    * through depth/stencil output due to the difference in compression
+    * pairing bit. On Gfx20 there is no difference.
     */
-   if (devinfo->ver < 20 && dst_image && is_image_stc_ccs_compressed(dst_image))
+   if (devinfo->ver < 20 && dst_image &&
+       (is_image_zcs_compressed(dst_image) ||
+        is_image_stc_ccs_compressed(dst_image)))
       return true;
 
    /* Blitter & compute engine cannot generate HiZ data */
@@ -749,6 +764,8 @@ void anv_CmdCopyImage2(
          }
       }
    }
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 static void
@@ -912,6 +929,8 @@ void anv_CmdCopyMemoryToImageKHR(
          }
       }
    }
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 static void
@@ -972,6 +991,8 @@ void anv_CmdCopyImageToMemoryKHR(
 
       anv_blorp_batch_finish(&batch);
    }
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 static bool
@@ -1090,6 +1111,8 @@ blit_image(struct anv_cmd_buffer *cmd_buffer,
       float depth_center_offset = 0;
       if (src_image->vk.image_type == VK_IMAGE_TYPE_3D)
          depth_center_offset = 0.5 / num_layers * (src_end - src_start);
+      else if (dst_image->vk.image_type == VK_IMAGE_TYPE_3D)
+         depth_center_offset = 0.5 / num_layers * (dst_end - dst_start);
 
       if (flip_z) {
          src_start = src_end;
@@ -1153,6 +1176,8 @@ void anv_CmdBlitImage2(
     */
    tex_cache_flush_hack(cmd_buffer, true);
    anv_blorp_batch_finish(&batch);
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 /* This is maximum possible width/height our HW can handle */
@@ -1230,6 +1255,8 @@ void anv_CmdCopyMemoryKHR(
    anv_add_buffer_write_pending_bits(cmd_buffer, "after copy buffer");
 
    anv_blorp_batch_finish(&batch);
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 void
@@ -1250,7 +1277,7 @@ anv_cmd_buffer_update_addr(
     * little data at the top to build its linked list.
     */
    const uint32_t max_update_size =
-      cmd_buffer->device->dynamic_state_pool.block_size - 64;
+      anv_device_get_dynamic_state_pool(cmd_buffer->device)->block_size - 64;
 
    assert(max_update_size < MAX_SURFACE_DIM * 4);
 
@@ -1317,6 +1344,8 @@ void anv_CmdUpdateMemoryKHR(
    anv_cmd_buffer_update_addr(cmd_buffer,
                               anv_address_from_range_flags(*pDstRange, dstFlags),
                               pDstRange->size, pData);
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 void
@@ -1403,6 +1432,8 @@ void anv_CmdFillMemoryKHR(
                             size, data);
 
    anv_add_buffer_write_pending_bits(cmd_buffer, "after fill buffer");
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 static void
@@ -1641,6 +1672,8 @@ void anv_CmdClearColorImage(
 
       anv_blorp_batch_finish(&batch);
    }
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 void anv_CmdClearDepthStencilImage(
@@ -1728,6 +1761,8 @@ void anv_CmdClearDepthStencilImage(
    }
 
    anv_blorp_batch_finish(&batch);
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 VkResult
@@ -1953,7 +1988,7 @@ anv_fast_clear_depth_stencil(struct anv_cmd_buffer *cmd_buffer,
              anv_image_aux_layers(image, VK_IMAGE_ASPECT_DEPTH_BIT, level));
       get_blorp_surf_for_anv_image(cmd_buffer,
                                    image, VK_IMAGE_ASPECT_DEPTH_BIT,
-                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                                    depth_layout, ISL_AUX_USAGE_NONE,
                                    ISL_FORMAT_UNSUPPORTED, false, &depth);
    }
@@ -1962,7 +1997,7 @@ anv_fast_clear_depth_stencil(struct anv_cmd_buffer *cmd_buffer,
    if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
       get_blorp_surf_for_anv_image(cmd_buffer,
                                    image, VK_IMAGE_ASPECT_STENCIL_BIT,
-                                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                                    stencil_layout, ISL_AUX_USAGE_NONE,
                                    ISL_FORMAT_UNSUPPORTED, false, &stencil);
    }
@@ -2160,8 +2195,13 @@ clear_depth_stencil_attachment(struct anv_cmd_buffer *cmd_buffer,
                     "vkCmdClearAttachments");
    }
 
-   bool clear_depth = attachment->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT;
-   bool clear_stencil = attachment->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT;
+   /* If any attachment’s aspectMask to be cleared is not backed by an image view,
+    * the clear has no effect on that aspect.
+    */
+   bool clear_depth = attachment->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT &&
+      d_att->vk_format != VK_FORMAT_UNDEFINED;
+   bool clear_stencil = attachment->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT &&
+      s_att->vk_format != VK_FORMAT_UNDEFINED;
 
    enum isl_format depth_format = ISL_FORMAT_UNSUPPORTED;
    if (d_att->vk_format != VK_FORMAT_UNDEFINED) {
@@ -2255,6 +2295,8 @@ void anv_CmdClearAttachments(
    }
 
    anv_blorp_batch_finish(&batch);
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 static void
@@ -2612,6 +2654,8 @@ void anv_CmdResolveImage2(
                     &pResolveImageInfo->pRegions[r],
                     res_info);
    }
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 void
@@ -2672,7 +2716,8 @@ anv_image_clear_depth_stencil(struct anv_cmd_buffer *cmd_buffer,
    if (aspects & VK_IMAGE_ASPECT_DEPTH_BIT) {
       get_blorp_surf_for_anv_image(cmd_buffer,
                                    image, VK_IMAGE_ASPECT_DEPTH_BIT,
-                                   0, ANV_IMAGE_LAYOUT_EXPLICIT_AUX,
+                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                   ANV_IMAGE_LAYOUT_EXPLICIT_AUX,
                                    depth_aux_usage, ISL_FORMAT_UNSUPPORTED,
                                    false, &depth);
    }
@@ -2683,7 +2728,8 @@ anv_image_clear_depth_stencil(struct anv_cmd_buffer *cmd_buffer,
          anv_image_aspect_to_plane(image, VK_IMAGE_ASPECT_STENCIL_BIT);
       get_blorp_surf_for_anv_image(cmd_buffer,
                                    image, VK_IMAGE_ASPECT_STENCIL_BIT,
-                                   0, ANV_IMAGE_LAYOUT_EXPLICIT_AUX,
+                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                   ANV_IMAGE_LAYOUT_EXPLICIT_AUX,
                                    image->planes[plane].aux_usage,
                                    ISL_FORMAT_UNSUPPORTED, false, &stencil);
    }
@@ -2742,7 +2788,8 @@ anv_image_hiz_op(struct anv_cmd_buffer *cmd_buffer,
    struct blorp_surf surf;
    get_blorp_surf_for_anv_image(cmd_buffer,
                                 image, VK_IMAGE_ASPECT_DEPTH_BIT,
-                                0, ANV_IMAGE_LAYOUT_EXPLICIT_AUX,
+                                VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                ANV_IMAGE_LAYOUT_EXPLICIT_AUX,
                                 image->planes[plane].aux_usage,
                                 ISL_FORMAT_UNSUPPORTED, false, &surf);
 
@@ -2846,6 +2893,8 @@ anv_CmdCopyMemoryIndirectKHR(
    blorp_copy_memory_indirect(&batch, indirect_buf_addr, copy_count, stride);
 
    anv_blorp_batch_finish(&batch);
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }
 
 void
@@ -2942,4 +2991,6 @@ anv_CmdCopyMemoryToImageIndirectKHR(
    }
 
    anv_blorp_batch_finish(&batch);
+
+   cmd_buffer->state.last_cmd_type = ANV_CMD_TYPE_TRANSFER;
 }

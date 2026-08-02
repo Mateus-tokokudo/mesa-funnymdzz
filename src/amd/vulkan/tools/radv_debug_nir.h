@@ -67,7 +67,7 @@ void radv_build_printf_args(struct radv_debug_nir *debug_nir, nir_builder *b, co
 
 void radv_build_printf(nir_builder *b, nir_def *cond, const char *format, ...);
 
-void radv_dump_printf_data(struct radv_device *device, FILE *out);
+void radv_dump_printf_data(struct radv_device *device, FILE *out, bool wait_idle);
 
 /* shader va validation */
 

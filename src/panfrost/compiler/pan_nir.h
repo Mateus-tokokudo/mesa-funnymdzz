@@ -12,6 +12,9 @@
 
 struct util_format_description;
 
+#define PAN_NIR_SET_BLAKE3_INTERNAL(nir, key)                                  \
+   _mesa_blake3_compute(key, sizeof(*key), nir->info.source_blake3)
+
 static inline nir_def *
 pan_nir_tile_rt_sample(nir_builder *b, nir_def *rt, nir_def *sample)
 {
@@ -57,7 +60,7 @@ pan_nir_res_handle(nir_builder *b, uint32_t table,
    }
 }
 
-static nir_def *
+static inline nir_def *
 pan_nir_load_va_desc(nir_builder *b, unsigned num_components, unsigned bit_size,
                      nir_def *handle, uint32_t offset)
 {
@@ -75,7 +78,7 @@ pan_nir_load_va_desc(nir_builder *b, unsigned num_components, unsigned bit_size,
                         .align_offset = offset);
 }
 
-static nir_def *
+static inline nir_def *
 pan_nir_load_va_buf_cvt(nir_builder *b, nir_def *handle)
 {
    /* Dword 7 of the buffer descriptor type is unused by hardware and is
@@ -109,7 +112,7 @@ pan_nir_load_va_tex_size(nir_builder *b, nir_def *handle,
    nir_def *size, *zero;
    nir_if *nif = nir_push_if(b, nir_inot(b, is_null));
    {
-      nir_def *comps[4] = {};
+      nir_def *comps[4] = {0};
       unsigned nr_comps = 0;
 
       comps[nr_comps++] = nir_channel(b, dw01, 2);
@@ -183,6 +186,8 @@ bool pan_nir_lower_vertex_id(nir_shader *shader);
 
 bool pan_nir_lower_image_ms(nir_shader *shader);
 
+bool pan_nir_lower_image_64bit(nir_shader *shader);
+
 bool pan_nir_lower_var_special_pan(nir_shader *shader);
 bool pan_nir_lower_noperspective_vs(nir_shader *shader);
 bool pan_nir_lower_noperspective_fs(nir_shader *shader,
@@ -198,12 +203,12 @@ bool pan_nir_lower_fs_inputs(nir_shader *shader, uint64_t gpu_id,
 
 bool pan_nir_lower_helper_invocation(nir_shader *shader);
 bool pan_nir_lower_sample_pos(nir_shader *shader);
-bool pan_nir_lower_xfb(nir_shader *nir);
 
 bool pan_nir_lower_image_index(nir_shader *shader,
                                unsigned vs_img_attrib_offset);
 bool pan_nir_lower_texel_buffer_fetch_index(nir_shader *shader,
                                             unsigned attrib_offset);
+bool pan_nir_lower_divergent_scratch(nir_shader *shader, unsigned arch);
 
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
@@ -229,6 +234,7 @@ nir_intrinsic_pan_bi_tex_flags(const nir_intrinsic_instr *instr)
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 struct pan_va_tex_flags {
+   bool skip : 1;
    bool wide_indices : 1;
    bool array_enable : 1;
    bool texel_offset : 1;
@@ -238,13 +244,15 @@ struct pan_va_tex_flags {
    bool force_delta_enable : 1;
    bool lod_bias_disable : 1;
    bool lod_clamp_disable : 1;
-   unsigned _pad : 21;
+   unsigned _pad : 20;
 };
 PRAGMA_DIAGNOSTIC_POP
 static_assert(sizeof(struct pan_va_tex_flags) == 4, "Must fit in uint32_t");
 
 bool pan_nir_lower_tex(nir_shader *nir, uint64_t gpu_id);
 bool pan_nir_lower_image(nir_shader *nir, uint64_t gpu_id);
+
+bool pan_nir_lower_mem_to_global(nir_shader *nir);
 
 nir_alu_type
 pan_unpacked_type_for_format(const struct util_format_description *desc);
@@ -263,6 +271,6 @@ bool pan_nir_resize_varying_io(nir_shader *nir,
                                const struct pan_varying_layout *varying_layout);
 
 bool pan_nir_fuse_io_cvt(nir_shader *nir, uint64_t gpu_id,
-                         struct pan_varying_layout *layout);
+                         const struct pan_varying_layout *layout);
 
 #endif /* __PAN_NIR_H__ */

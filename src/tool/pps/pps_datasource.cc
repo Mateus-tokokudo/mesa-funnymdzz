@@ -16,9 +16,7 @@
 #include <thread>
 #include <variant>
 #include <inttypes.h>
-
-// Minimum supported sampling period in nanoseconds
-#define MIN_SAMPLING_PERIOD_NS 5000
+#include <util/bitscan.h>
 
 namespace pps
 {
@@ -57,22 +55,15 @@ void GpuDataSource::OnSetup(const SetupArgs &args)
       driver->enable_all_counters();
    }
 
-   // Get sampling period
-   auto min_sampling_period = std::chrono::nanoseconds(MIN_SAMPLING_PERIOD_NS);
-
-   auto dev_supported = std::chrono::nanoseconds(driver->get_min_sampling_period_ns());
-   if (dev_supported > min_sampling_period) {
-      min_sampling_period = dev_supported;
-   }
-
-   time_to_sleep = std::max(time_to_sleep, min_sampling_period);
+   auto drv_min_sampling_period = std::chrono::nanoseconds(driver->get_min_sampling_period_ns());
+   time_to_sleep = std::max(time_to_sleep, drv_min_sampling_period);
 
    if (config.has_counter_period_ns()) {
       auto requested_sampling_period = std::chrono::nanoseconds(config.counter_period_ns());
-      if (requested_sampling_period < min_sampling_period) {
+      if (requested_sampling_period < drv_min_sampling_period) {
          PPS_LOG_ERROR("Sampling period should be greater than %" PRIu64 " ns (%.2f ms)",
-            uint64_t(min_sampling_period.count()),
-            ms(min_sampling_period));
+            uint64_t(drv_min_sampling_period.count()),
+            ms(drv_min_sampling_period));
       } else {
          time_to_sleep = requested_sampling_period;
       }
@@ -126,7 +117,7 @@ void GpuDataSource::wait_started()
    }
 }
 
-template <typename GpuCounterDescriptor> void add_group(GpuCounterDescriptor *desc,
+template <typename GpuCounterDescriptor> void add_block(GpuCounterDescriptor *desc,
    const CounterGroup &group,
    const std::string &prefix,
    int32_t gpu_num)
@@ -146,7 +137,7 @@ template <typename GpuCounterDescriptor> void add_group(GpuCounterDescriptor *de
    for (auto const &sub : group.subgroups) {
       // Perfetto doesnt currently support nested groups.
       // Flatten group hierarchy, using dot separator
-      add_group(desc, sub, prefix + "." + group.name, gpu_num);
+      add_block(desc, sub, prefix + "." + group.name, gpu_num);
    }
 }
 
@@ -157,7 +148,7 @@ template <typename GpuCounterDescriptor> void add_descriptors(GpuCounterDescript
 {
    // Add the groups
    for (auto const &group : groups) {
-      add_group(desc, group, driver.drm_device.name, driver.drm_device.gpu_num);
+      add_block(desc, group, driver.drm_device.name, driver.drm_device.gpu_num);
    }
 
    // Add the counters
@@ -166,6 +157,10 @@ template <typename GpuCounterDescriptor> void add_descriptors(GpuCounterDescript
       spec->set_counter_id(counter.id);
       spec->set_name(counter.name);
       spec->set_description(counter.description);
+
+      // These counters describe the interval starting at the sample timestamp.
+      spec->set_value_direction(
+         GpuCounterDescriptor::GpuCounterSpec::VALUE_DIRECTION_FORWARDS_LOOKING);
 
       auto units = GpuCounterDescriptor::NONE;
       switch (counter.units) {
@@ -181,10 +176,27 @@ template <typename GpuCounterDescriptor> void add_descriptors(GpuCounterDescript
       case Counter::Units::None:
          units = GpuCounterDescriptor::NONE;
          break;
+      case Counter::Units::Primitive:
+         units = GpuCounterDescriptor::PRIMITIVE;
+         break;
+      case Counter::Units::Instruction:
+         units = GpuCounterDescriptor::INSTRUCTION;
+         break;
+      case Counter::Units::Pixel:
+         units = GpuCounterDescriptor::PIXEL;
+         break;
+      case Counter::Units::Fragment:
+         units = GpuCounterDescriptor::FRAGMENT;
+         break;
       default:
          assert(false && "Missing counter units type!");
          break;
       }
+
+      u_foreach_bit(b, counter.group_mask) {
+         spec->add_groups(static_cast<typename GpuCounterDescriptor::GpuCounterGroup>(b));
+      }
+
       spec->add_numerator_units(units);
       spec->set_select_by_default(true);
    }
@@ -296,10 +308,27 @@ void GpuDataSource::trace(TraceContext &ctx)
       descriptor_gpu_timestamp = driver->gpu_timestamp();
       state->was_cleared = false;
       state->last_counter_vals.clear();
+      state->has_prev_sample_end_timestamp = false;
+      state->prev_sample_end_timestamp = 0;
    }
 
    if (driver->dump_perfcnt()) {
-      while (auto gpu_timestamp = driver->next()) {
+      while (auto sample_timestamp = driver->next()) {
+         uint64_t gpu_timestamp = sample_timestamp;
+
+         if (!driver->sample_timestamps_are_interval_starts()) {
+            if (!state->has_prev_sample_end_timestamp) {
+               state->has_prev_sample_end_timestamp = true;
+               state->prev_sample_end_timestamp = sample_timestamp;
+               continue;
+            }
+
+            // Convert end-of-interval timestamps to start-of-interval
+            // for VALUE_DIRECTION_FORWARDS_LOOKING counters.
+            gpu_timestamp = state->prev_sample_end_timestamp;
+            state->prev_sample_end_timestamp = sample_timestamp;
+         }
+
          if (gpu_timestamp <= descriptor_gpu_timestamp) {
             // Do not send counter values before counter descriptors
             PPS_LOG_ERROR("Skipping counter values coming before descriptors");

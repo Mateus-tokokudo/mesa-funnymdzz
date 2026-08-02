@@ -280,10 +280,8 @@ emit_biases(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation
 static void
 emit_activation(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation)
 {
-   unsigned min = 0;
-
-   if (operation->type == ETHOSU_OPERATION_TYPE_ELTWISE)
-      min = operation->eltwise.activation_min;
+   int min = 0;
+   int max;
 
    if (operation->type == ETHOSU_OPERATION_TYPE_POOLING)
       EMIT0(NPU_SET_ACTIVATION, operation->pooling.activation);
@@ -291,12 +289,30 @@ emit_activation(struct ethosu_subgraph *subgraph, struct ethosu_operation *opera
       EMIT0(NPU_SET_ACTIVATION, 0x0);
 
    if (operation->ofm.is_signed) {
-      EMIT0(NPU_SET_ACTIVATION_MIN, 0xff80);
-      EMIT0(NPU_SET_ACTIVATION_MAX, 0x7f);
+      if (operation->ofm.precision == 0) {
+         min = INT8_MIN;
+         max = INT8_MAX;
+      } else {
+         min = INT16_MIN;
+         max = INT16_MAX;
+      }
    } else {
-      EMIT0(NPU_SET_ACTIVATION_MIN, min);
-      EMIT0(NPU_SET_ACTIVATION_MAX, 0xff);
+      if (operation->ofm.precision == 0)
+         max = UINT8_MAX;
+      else
+         max = UINT16_MAX;
    }
+
+   if (operation->type == ETHOSU_OPERATION_TYPE_ELTWISE &&
+       !operation->ofm.is_signed)
+      min = operation->eltwise.activation_min;
+   else if (operation->type == ETHOSU_OPERATION_TYPE_CONVOLUTION) {
+      min = operation->conv.activation_min;
+      max = operation->conv.activation_max;
+   }
+
+   EMIT0(NPU_SET_ACTIVATION_MIN, (uint16_t)min);
+   EMIT0(NPU_SET_ACTIVATION_MAX, (uint16_t)max);
 }
 
 static void
@@ -478,7 +494,7 @@ emit_pooling(struct ethosu_subgraph *subgraph, struct ethosu_operation *operatio
    if (operation->pooling.nop) {
       scale = ethosu_quantize_scale(
          operation->ifm.scale / operation->ofm.scale,
-         &scale_shift, true);
+         &scale_shift, false);
       EMIT1(NPU_SET_OFM_SCALE, NPU_SET_OFM_SCALE_SHIFT(scale_shift), scale);
    } else {
       switch (operation->pooling.type) {
@@ -601,11 +617,11 @@ emit_ifm2_broadcast(struct ethosu_subgraph *subgraph, struct ethosu_operation *o
       if (has_scalar) {
          ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_BROADCAST_SCALAR(1);
       } else {
-         if (operation->ifm.shape.height != operation->ifm2.shape.height)
+         if (operation->ifm2.shape.height != operation->ofm.shape.height)
             ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_BROADCAST_HEIGHT__MASK;
-         if (operation->ifm.shape.width != operation->ifm2.shape.width)
+         if (operation->ifm2.shape.width != operation->ofm.shape.width)
             ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_BROADCAST_WIDTH__MASK;
-         if (operation->ifm.shape.depth != operation->ifm2.shape.depth)
+         if (operation->ifm2.shape.depth != operation->ofm.shape.depth)
             ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_BROADCAST_DEPTH__MASK;
       }
    } else {
@@ -615,8 +631,8 @@ emit_ifm2_broadcast(struct ethosu_subgraph *subgraph, struct ethosu_operation *o
          ifm_mode = 0;
          ifm2_mode = 8; /* SCALAR */
       } else {
-         ifm_mode = calc_broadcast_mode(&operation->ifm.shape, &operation->ifm2.shape);
-         ifm2_mode = calc_broadcast_mode(&operation->ifm2.shape, &operation->ifm.shape);
+         ifm_mode = calc_broadcast_mode(&operation->ifm.shape, &operation->ofm.shape);
+         ifm2_mode = calc_broadcast_mode(&operation->ifm2.shape, &operation->ofm.shape);
       }
 
       EMIT0(NPU_SET_IFM_BROADCAST, ifm_mode);
@@ -939,6 +955,24 @@ ethosu_operations_conflict(struct ethosu_subgraph *subgraph,
 }
 
 static void
+remove_completed_wait_ops(struct util_dynarray *outstanding_ops, unsigned completed)
+{
+   unsigned count =
+      util_dynarray_num_elements(outstanding_ops, struct ethosu_operation *);
+   unsigned remaining = count - completed;
+   struct ethosu_operation **ops = outstanding_ops->data;
+
+   memmove(ops, ops + completed, remaining * sizeof(*ops));
+   outstanding_ops->size = remaining * sizeof(*ops);
+}
+
+static void
+remove_oldest_wait_op(struct util_dynarray *outstanding_ops)
+{
+   remove_completed_wait_ops(outstanding_ops, 1);
+}
+
+static void
 get_wait_dependency(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation,
                     struct util_dynarray *outstanding_dma_ops,
                     struct util_dynarray *outstanding_npu_ops,
@@ -955,7 +989,7 @@ get_wait_dependency(struct ethosu_subgraph *subgraph, struct ethosu_operation *o
 
       unsigned dmap_ops = util_dynarray_num_elements(outstanding_dma_ops, struct ethosu_operation *);
       if (dmap_ops > MAX_OUTSTANDING_DMA_OPS)
-         (void)util_dynarray_pop(outstanding_dma_ops, struct ethosu_operation *);
+         remove_oldest_wait_op(outstanding_dma_ops);
    } else {
       outstanding_ops = outstanding_dma_ops;
 
@@ -963,7 +997,7 @@ get_wait_dependency(struct ethosu_subgraph *subgraph, struct ethosu_operation *o
 
       unsigned npu_ops = util_dynarray_num_elements(outstanding_npu_ops, struct ethosu_operation *);
       if (npu_ops > MAX_OUTSTANDING_NPU_OPS)
-         (void)util_dynarray_pop(outstanding_npu_ops, struct ethosu_operation *);
+         remove_oldest_wait_op(outstanding_npu_ops);
    }
 
    unsigned waits = -1;
@@ -977,10 +1011,10 @@ get_wait_dependency(struct ethosu_subgraph *subgraph, struct ethosu_operation *o
             kern_wait = waits;
          else
             dma_wait = waits;
-         // Current op needs to wait, and after it has waited,
-         // outstanding_ops[0..idx] are not outstanding any longer.
-         for (int i = 0; i <= idx; i++)
-            (void)util_dynarray_pop(outstanding_ops, struct ethosu_operation *);
+         /* Current op needs to wait.  The wait count leaves any newer
+          * operations in flight, while operations up to idx are completed.
+          */
+         remove_completed_wait_ops(outstanding_ops, idx + 1);
          break;
       }
    }
@@ -1002,7 +1036,7 @@ fill_memory_accesses(struct ethosu_subgraph *subgraph)
          operation->read_accesses[0].size = operation->dma.size;
 
          operation->write_accesses[0].region = operation->dma.dst_region;
-         operation->write_accesses[0].address = 0x0;
+         operation->write_accesses[0].address = operation->dma.dst_address;
          operation->write_accesses[0].size = operation->dma.size;
 
          break;
@@ -1028,7 +1062,7 @@ fill_memory_accesses(struct ethosu_subgraph *subgraph)
          operation->read_accesses[3].region = operation->conv.weights.region;
          operation->read_accesses[3].address = operation->conv.weights.address;
          operation->read_accesses[3].size = operation->conv.weights.size;
-         /* fall-through */
+         FALLTHROUGH;
       default:
          operation->read_accesses[0].region = IO_REGION;
          operation->read_accesses[0].address = operation->ifm.tiles.addresses[0];

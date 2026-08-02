@@ -90,7 +90,7 @@ apple_cgl_init(void)
 
    apple_cgl.get_version(&apple_cgl.version_major, &apple_cgl.version_minor);
 
-   apple_glx_diagnostic("CGL major %d minor %d\n", apple_cgl.version_major, apple_cgl.version_minor);
+   apple_glx_log_info("CGL major %d minor %d", apple_cgl.version_major, apple_cgl.version_minor);
 
    if (1 != apple_cgl.version_major) {
       fprintf(stderr, "WARNING: the CGL major version has changed!\n"
@@ -109,6 +109,9 @@ apple_cgl_init(void)
    apple_cgl.set_current_context = sym(h, "CGLSetCurrentContext");
    apple_cgl.get_current_context = sym(h, "CGLGetCurrentContext");
    apple_cgl.error_string = sym(h, "CGLErrorString");
+
+   apple_cgl.set_parameter = sym(h, "CGLSetParameter");
+   apple_cgl.get_parameter = sym(h, "CGLGetParameter");
 
    apple_cgl.set_off_screen = sym(h, "CGLSetOffScreen");
 

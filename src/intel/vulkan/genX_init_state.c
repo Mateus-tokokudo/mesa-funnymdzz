@@ -51,7 +51,7 @@ genX(emit_slice_hashing_state)(struct anv_device *device,
    if (!device->slice_hash.alloc_size) {
       unsigned size = GENX(SLICE_HASH_TABLE_length) * 4;
       device->slice_hash =
-         anv_state_pool_alloc(&device->dynamic_state_pool, size, 64);
+         anv_state_pool_alloc(anv_device_get_dynamic_state_pool(device), size, 64);
 
       const bool flip = device->info->ppipe_subslices[0] <
                      device->info->ppipe_subslices[1];
@@ -131,7 +131,7 @@ genX(emit_slice_hashing_state)(struct anv_device *device,
    if (!device->slice_hash.alloc_size) {
       unsigned size = GENX(SLICE_HASH_TABLE_length) * 4;
       device->slice_hash =
-         anv_state_pool_alloc(&device->dynamic_state_pool, size, 64);
+         anv_state_pool_alloc(anv_device_get_dynamic_state_pool(device), size, 64);
 
       struct GENX(SLICE_HASH_TABLE) table;
 
@@ -155,25 +155,12 @@ genX(emit_slice_hashing_state)(struct anv_device *device,
       ptr.SliceHashTableStatePointer = device->slice_hash.offset;
    }
 
-   /* TODO: Figure out FCV support for other platforms
-    * Testing indicates that FCV is broken gfx125.
-    * Let's disable FCV for now till we figure out what's wrong.
-    *
-    * Alternatively, it can be toggled off via drirc option 'anv_disable_fcv'.
-    *
-    * Ref: https://gitlab.freedesktop.org/mesa/mesa/-/issues/9987
-    * Ref: https://gitlab.freedesktop.org/mesa/mesa/-/issues/10318
-    * Ref: https://gitlab.freedesktop.org/mesa/mesa/-/issues/10795
-    * Ref: Internal issue 1480 about Unreal Engine 5.1
-    */
    anv_batch_emit(batch, GENX(3DSTATE_3D_MODE), mode) {
       mode.SliceHashingTableEnable = true;
       mode.SliceHashingTableEnableMask = true;
       mode.CrossSliceHashingMode = (util_bitcount(ppipe_mask1) > 1 ?
 				    hashing32x32 : NormalMode);
       mode.CrossSliceHashingModeMask = -1;
-      mode.FastClearOptimizationEnable = !device->physical->disable_fcv;
-      mode.FastClearOptimizationEnableMask = !device->physical->disable_fcv;
    }
 #endif
 }
@@ -263,17 +250,17 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
 
       sba.SurfaceStateBaseAddress =
          (struct anv_address) { .offset =
-         device->physical->va.internal_surface_state_pool.addr,
+         anv_physical_device_get_internal_surface_state_pool_va(device->physical)->addr,
       };
       sba.SurfaceStateMOCS = mocs;
       sba.SurfaceStateBaseAddressModifyEnable = true;
 
       sba.DynamicStateBaseAddress =
          (struct anv_address) { .offset =
-         device->physical->va.dynamic_state_pool.addr,
+         anv_physical_device_get_dynamic_state_pool_va(device->physical)->addr,
       };
-      sba.DynamicStateBufferSize = (device->physical->va.dynamic_state_pool.size +
-                                    device->physical->va.dynamic_visible_pool.size) / 4096;
+      sba.DynamicStateBufferSize = (anv_physical_device_get_dynamic_state_pool_va(device->physical)->size +
+                                    anv_physical_device_get_dynamic_visible_pool_va(device->physical)->size) / 4096;
       sba.DynamicStateMOCS = mocs;
       sba.DynamicStateBaseAddressModifyEnable = true;
       sba.DynamicStateBufferSizeModifyEnable = true;
@@ -305,7 +292,7 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
       if (device->physical->indirect_descriptors) {
          sba.BindlessSurfaceStateBaseAddress =
             (struct anv_address) { .offset =
-            device->physical->va.bindless_surface_state_pool.addr,
+            anv_physical_device_get_bindless_surface_state_pool_va(device->physical)->addr,
          };
          sba.BindlessSurfaceStateSize =
             anv_physical_device_bindless_heap_size(device->physical, false) /
@@ -317,11 +304,11 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
           * same heap
           */
          sba.BindlessSurfaceStateBaseAddress = (struct anv_address) {
-            .offset = device->physical->va.internal_surface_state_pool.addr,
+            .offset = anv_physical_device_get_internal_surface_state_pool_va(device->physical)->addr,
          };
          sba.BindlessSurfaceStateSize =
-            (device->physical->va.internal_surface_state_pool.size +
-             device->physical->va.bindless_surface_state_pool.size) - 1;
+            (anv_physical_device_get_internal_surface_state_pool_va(device->physical)->size +
+             anv_physical_device_get_bindless_surface_state_pool_va(device->physical)->size) - 1;
          sba.BindlessSurfaceStateMOCS = mocs;
          sba.BindlessSurfaceStateBaseAddressModifyEnable = true;
       }
@@ -347,7 +334,7 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
    mi_builder_init(&b, device->info, batch);
 
    mi_store(&b, mi_reg64(ANV_BINDLESS_SURFACE_BASE_ADDR_REG),
-                mi_imm(device->physical->va.internal_surface_state_pool.addr));
+                mi_imm(anv_physical_device_get_internal_surface_state_pool_va(device->physical)->addr));
 #endif /* GFX_VER >= 12 */
 
 #if GFX_VERx10 >= 125
@@ -885,7 +872,7 @@ init_compute_queue_state(struct anv_queue *queue)
       cm.EnableVariableRegisterSizeAllocation = !INTEL_DEBUG(DEBUG_NO_VRT);
 #endif
 #if GFX_VER >= 20
-      cm.AsyncComputeThreadLimit = ACTL_Max8;
+      cm.AsyncComputeThreadLimit = ACTL_Disabled;
       cm.ZPassAsyncComputeThreadLimit = ZPACTL_Max60;
       cm.ZAsyncThrottlesettings = ZATS_DefertoAsyncComputeThreadLimit;
       cm.AsyncComputeThreadLimitMask = 0x7;
@@ -894,7 +881,7 @@ init_compute_queue_state(struct anv_queue *queue)
       cm.Mask2 = 0xffff;
       cm.UAVCoherencyMode = FlushDataportL1;
 #else
-      cm.PixelAsyncComputeThreadLimit = PACTL_Max24;
+      cm.PixelAsyncComputeThreadLimit = PACTL_Disabled;
       cm.ZPassAsyncComputeThreadLimit = ZPACTL_Max60;
       cm.PixelAsyncComputeThreadLimitMask = 0x7;
       cm.ZPassAsyncComputeThreadLimitMask = 0x7;
@@ -1194,6 +1181,20 @@ genX(emit_l3_config)(struct anv_batch *batch,
 #endif /* GFX_VER < 20 */
 }
 
+static const VkSampleLocationEXT *
+sample_locations(const struct vk_sample_locations_state *sl, unsigned samples)
+{
+   /* We don't do 1x MSAA, and we can't support custom sample
+    * positions without MSAA, so always program the default for this
+    * case.
+    */
+   if (sl && sl->per_pixel == samples && samples > 1) {
+      return sl->locations;
+   } else {
+      return vk_standard_sample_locations_state(samples)->locations;
+   }
+}
+
 void
 genX(emit_sample_pattern)(struct anv_batch *batch,
                           const struct vk_sample_locations_state *sl)
@@ -1222,47 +1223,10 @@ genX(emit_sample_pattern)(struct anv_batch *batch,
        * lit sample and that it's the same for all samples in a pixel; they
        * have no requirement that it be the one closest to center.
        */
-      for (uint32_t i = 1; i <= 16; i *= 2) {
-         switch (i) {
-         case VK_SAMPLE_COUNT_1_BIT:
-            /* We don't do 1x MSAA, and we can't support custom sample
-             * positions without MSAA, so always program the default for this
-             * case.
-             */
-            INTEL_SAMPLE_POS_1X(sp._1xSample);
-            break;
-         case VK_SAMPLE_COUNT_2_BIT:
-            if (sl && sl->per_pixel == i) {
-               INTEL_SAMPLE_POS_2X_ARRAY(sp._2xSample, sl->locations);
-            } else {
-               INTEL_SAMPLE_POS_2X(sp._2xSample);
-            }
-            break;
-         case VK_SAMPLE_COUNT_4_BIT:
-            if (sl && sl->per_pixel == i) {
-               INTEL_SAMPLE_POS_4X_ARRAY(sp._4xSample, sl->locations);
-            } else {
-               INTEL_SAMPLE_POS_4X(sp._4xSample);
-            }
-            break;
-         case VK_SAMPLE_COUNT_8_BIT:
-            if (sl && sl->per_pixel == i) {
-               INTEL_SAMPLE_POS_8X_ARRAY(sp._8xSample, sl->locations);
-            } else {
-               INTEL_SAMPLE_POS_8X(sp._8xSample);
-            }
-            break;
-         case VK_SAMPLE_COUNT_16_BIT:
-            if (sl && sl->per_pixel == i) {
-               INTEL_SAMPLE_POS_16X_ARRAY(sp._16xSample, sl->locations);
-            } else {
-               INTEL_SAMPLE_POS_16X(sp._16xSample);
-            }
-            break;
-         default:
-            UNREACHABLE("Invalid sample count");
-         }
-      }
+      INTEL_SAMPLE_POS_1X_ARRAY(sp._1xSample, sample_locations(sl, 1));
+      INTEL_SAMPLE_POS_2X_ARRAY(sp._2xSample, sample_locations(sl, 2));
+      INTEL_SAMPLE_POS_4X_ARRAY(sp._4xSample, sample_locations(sl, 4));
+      INTEL_SAMPLE_POS_8X_ARRAY(sp._8xSample, sample_locations(sl, 8));
    }
 }
 
@@ -1459,23 +1423,23 @@ genX(emit_embedded_sampler)(struct anv_device *device,
    memcpy(&sampler->key, &binding->key, sizeof(binding->key));
 
    sampler->border_color_state =
-      anv_state_pool_alloc(&device->dynamic_state_pool,
+      anv_state_pool_alloc(anv_device_get_dynamic_state_pool(device),
                            sizeof(struct gfx8_border_color), 64);
    memcpy(sampler->border_color_state.map,
           binding->key.color,
           sizeof(binding->key.color));
 
    sampler->sampler_state =
-      anv_state_pool_alloc(&device->dynamic_state_pool,
-                           ANV_SAMPLER_STATE_SIZE, 32);
+      anv_state_pool_alloc(anv_device_get_dynamic_state_pool(device),
+                           ANV_SAMPLER_STATE_GPU_SIZE(GFX_VERx10), 32);
 
    struct GENX(SAMPLER_STATE) sampler_state = {
       .BorderColorPointer = sampler->border_color_state.offset,
    };
-   uint32_t dwords[GENX(SAMPLER_STATE_length)];
+   uint32_t dwords[ANV_SAMPLER_STATE_DWORDS];
    GENX(SAMPLER_STATE_pack)(NULL, dwords, &sampler_state);
 
-   for (uint32_t i = 0; i < GENX(SAMPLER_STATE_length); i++) {
+   for (uint32_t i = 0; i < (ANV_SAMPLER_STATE_GPU_SIZE(GFX_VERx10) / sizeof(uint32_t)); i++) {
       ((uint32_t *)sampler->sampler_state.map)[i] =
          dwords[i] | binding->key.sampler[i];
    }

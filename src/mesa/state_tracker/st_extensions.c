@@ -1185,6 +1185,10 @@ void st_init_extensions(struct pipe_screen *screen,
    init_format_extensions(screen, extensions, depthstencil_mapping,
                           ARRAY_SIZE(depthstencil_mapping), PIPE_TEXTURE_2D,
                           PIPE_BIND_DEPTH_STENCIL | PIPE_BIND_SAMPLER_VIEW);
+
+   if (!screen->caps.native_fp32_depth)
+      extensions->ARB_depth_buffer_float = GL_FALSE;
+
    init_format_extensions(screen, extensions, texture_mapping,
                           ARRAY_SIZE(texture_mapping), PIPE_TEXTURE_2D,
                           PIPE_BIND_SAMPLER_VIEW);
@@ -1491,14 +1495,14 @@ void st_init_extensions(struct pipe_screen *screen,
                                                   samples,
                                                   storage_samples,
                                                   PIPE_BIND_RENDER_TARGET)) {
-                     unsigned i = consts->NumSupportedMultisampleModes;
+                     unsigned mode = consts->NumSupportedMultisampleModes;
 
-                     assert(i < ARRAY_SIZE(consts->SupportedMultisampleModes));
-                     consts->SupportedMultisampleModes[i].NumColorSamples =
+                     assert(mode < ARRAY_SIZE(consts->SupportedMultisampleModes));
+                     consts->SupportedMultisampleModes[mode].NumColorSamples =
                         samples;
-                     consts->SupportedMultisampleModes[i].NumColorStorageSamples =
+                     consts->SupportedMultisampleModes[mode].NumColorStorageSamples =
                         storage_samples;
-                     consts->SupportedMultisampleModes[i].NumDepthStencilSamples =
+                     consts->SupportedMultisampleModes[mode].NumDepthStencilSamples =
                         depth_samples;
                      consts->NumSupportedMultisampleModes++;
                   }

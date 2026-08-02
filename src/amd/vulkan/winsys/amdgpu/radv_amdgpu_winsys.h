@@ -74,6 +74,7 @@ struct radv_amdgpu_winsys {
    struct {
       /* A zero-allocated BO used to map the LOW address space of virtual allocations. */
       struct radeon_winsys_bo *bo;
+      simple_mtx_t lock;
    } null_prt_bug;
 };
 
@@ -81,6 +82,23 @@ static inline struct radv_amdgpu_winsys *
 radv_amdgpu_winsys(struct radeon_winsys *base)
 {
    return (struct radv_amdgpu_winsys *)base;
+}
+
+static inline uint32_t
+radeon_to_amdgpu_priority(enum radeon_ctx_priority priority)
+{
+   switch (priority) {
+   case RADEON_CTX_PRIORITY_REALTIME:
+      return AMDGPU_CTX_PRIORITY_VERY_HIGH;
+   case RADEON_CTX_PRIORITY_HIGH:
+      return AMDGPU_CTX_PRIORITY_HIGH;
+   case RADEON_CTX_PRIORITY_MEDIUM:
+      return AMDGPU_CTX_PRIORITY_NORMAL;
+   case RADEON_CTX_PRIORITY_LOW:
+      return AMDGPU_CTX_PRIORITY_LOW;
+   default:
+      UNREACHABLE("Invalid context priority");
+   }
 }
 
 #endif /* RADV_AMDGPU_WINSYS_H */

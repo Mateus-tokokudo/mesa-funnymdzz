@@ -11,7 +11,7 @@
 
 /* Validatation doesn't make sense in release builds */
 #ifndef NDEBUG
-#define NUM_VALIDATE_FILES (UACCUM + 1)
+#define NUM_VALIDATE_FILES (ACCUM + 1)
 
 struct regfile {
    /* For each register in each file, records the SSA index currently stored
@@ -26,11 +26,6 @@ struct regfile {
 static uint32_t *
 reg(struct regfile *rf, enum jay_file file, uint32_t reg)
 {
-   /* FLAG and UFLAG share their registers */
-   if (file == UFLAG) {
-      file = FLAG;
-   }
-
    assert(file < NUM_VALIDATE_FILES);
    assert(reg < rf->n[file]);
    return &rf->r[file][reg];
@@ -58,28 +53,45 @@ print_regfile(struct regfile *rf, FILE *fp)
 }
 
 static bool
+validate_regblock(jay_shader *shader, jay_def x)
+{
+   if (x.file < JAY_NUM_GRF_FILES) {
+      struct jay_partition *p = &shader->partition;
+      struct jay_register_block B = jay_lookup_block(p, x.reg, x.file);
+
+      jay_foreach_comp(x, c) {
+         struct jay_register_block A = jay_lookup_block(p, x.reg + c, x.file);
+         if (memcmp(&A, &B, sizeof(A))) {
+            fprintf(stderr, "cannot cross partition blocks\n");
+            return false;
+         }
+      }
+
+      if (B.type == JAY_BLOCK_SPILL) {
+         fprintf(stderr, "cannot access reserved spill registers\n");
+         return false;
+      }
+   }
+
+   return true;
+}
+
+static bool
 validate_src(
    jay_shader *shader, jay_inst *I, unsigned s, struct regfile *rf, jay_def def)
 {
    jay_foreach_comp(def, c) {
       uint32_t actual = *def_reg(rf, def, c);
 
-      if (def.file == GPR) {
-         assert(jay_def_stride(shader, def) ==
-                jay_def_stride(shader, jay_extract_post_ra(def, c)));
-      }
-
       if (actual == 0 || actual != jay_channel(def, c)) {
          fprintf(stderr, "invalid RA for source %u, channel %u.\n", s, c);
-
          fprintf(stderr, "expected index %u but", jay_channel(def, c));
+
          if (actual)
             fprintf(stderr, " got index %u\n", actual);
          else
             fprintf(stderr, " register is undefined\n");
 
-         jay_print_inst(stderr, I);
-         print_regfile(rf, stderr);
          return false;
       }
    }
@@ -92,16 +104,7 @@ validate_block(jay_function *func, jay_block *block, struct regfile *blocks)
 {
    jay_shader *shader = func->shader;
    struct regfile *rf = &blocks[block->index];
-   bool success = true;
-
-   /* Pathological shaders can end up with loop headers that have only a
-    * single predecessor and act like normal blocks. Validate them as such,
-    * since RA treats them as such implicitly. Affects:
-    *
-    * dEQP-VK.graphicsfuzz.spv-stable-mergesort-dead-code
-    */
-   bool loop_header =
-      block->loop_header && jay_num_predecessors(block, GPR) > 1;
+   bool all_ok = true;
 
    /* Initialize the register file based on predecessors. */
    /* Initialize with the exit state of any one predecessor */
@@ -114,7 +117,7 @@ validate_block(jay_function *func, jay_block *block, struct regfile *blocks)
    }
 
    /* TODO: Handle loop header validation better */
-   if (!loop_header) {
+   if (!block->loop_header) {
       /* Intersect with the other predecessor. If a register has different
        * values coming in from each block, it is considered undefined at the
        * start of the block.
@@ -133,23 +136,24 @@ validate_block(jay_function *func, jay_block *block, struct regfile *blocks)
    }
 
    jay_foreach_inst_in_block(block, I) {
+      bool ok = true;
+
       /* Validate sources */
       jay_foreach_ssa_src(I, s) {
+         ok &= validate_regblock(shader, I->src[s]);
+
          if (jay_channel(I->src[s], 0) != JAY_SENTINEL) {
-            success &= validate_src(shader, I, s, rf, I->src[s]);
+            ok &= validate_src(shader, I, s, rf, I->src[s]);
          }
       }
 
       /* Record destinations */
       jay_foreach_dst(I, dst) {
+         ok &= validate_regblock(shader, dst);
+
          if (jay_channel(dst, 0) != JAY_SENTINEL) {
             jay_foreach_comp(dst, c) {
                *def_reg(rf, dst, c) = jay_channel(dst, c);
-
-               if (dst.file == GPR) {
-                  assert(jay_def_stride(shader, dst) ==
-                         jay_def_stride(shader, jay_extract_post_ra(dst, c)));
-               }
             }
          }
       }
@@ -166,9 +170,16 @@ validate_block(jay_function *func, jay_block *block, struct regfile *blocks)
             *def_reg(rf, I->dst, c) = *def_reg(rf, I->src[0], c);
          }
       }
+
+      if (!ok) {
+         jay_print_inst(stderr, block, I, NULL);
+         print_regfile(rf, stderr);
+      }
+
+      all_ok &= ok;
    }
 
-   return success;
+   return all_ok;
 }
 
 void
@@ -185,7 +196,6 @@ jay_validate_ra(jay_function *func)
 
       for (unsigned file = 0; file < NUM_VALIDATE_FILES; ++file) {
          b->n[file] = file == ACCUM  ? 8 / jay_grf_per_gpr(func->shader) :
-                      file == UACCUM ? 4 * jay_ugpr_per_grf(func->shader) :
                                        jay_num_regs(func->shader, file);
          b->r[file] = linear_zalloc_array(lin_ctx, uint32_t, b->n[file]);
       }

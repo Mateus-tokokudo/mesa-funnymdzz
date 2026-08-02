@@ -12,6 +12,7 @@
 #include "radv_cp_dma.h"
 #include "radv_meta.h"
 #include "radv_sdma.h"
+#include "radv_tracepoints.h"
 #include "vk_shader_module.h"
 
 #include "radv_cs.h"
@@ -202,6 +203,8 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, ui
       return;
    }
 
+   radv_utrace_begin_compute_copy_memory(cmd_buffer, size);
+
    radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    assert(size <= UINT32_MAX);
@@ -223,6 +226,8 @@ radv_compute_copy_memory(struct radv_cmd_buffer *cmd_buffer, uint64_t src_va, ui
    radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(copy_consts), &copy_consts);
 
    radv_unaligned_dispatch(cmd_buffer, dim_x, 1, 1);
+
+   radv_utrace_end_compute_copy_memory(cmd_buffer);
 }
 
 static bool
@@ -235,8 +240,12 @@ radv_prefer_compute_or_cp_dma(const struct radv_device *device, uint64_t size, V
    if (pdev->info.gfx_level >= GFX10 && pdev->info.has_dedicated_vram) {
       if (!(src_copy_flags & VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR) ||
           !(dst_copy_flags & VK_ADDRESS_COPY_DEVICE_LOCAL_BIT_KHR)) {
-         /* Prefer CP DMA for GTT on dGPUS due to slow PCIe. */
-         use_compute = false;
+         /* For GTT/host memory on dGPUs, CP DMA avoids occupying the compute
+          * units. But CP DMA is a serial engine that badly underperforms a
+          * compute copy for large transfers, even over PCIe: keep CP DMA only
+          * for small GTT copies and use a compute copy for large ones. */
+         if (size <= RADV_BUFFER_OPS_GTT_CP_DMA_MAX_BYTES)
+            use_compute = false;
       }
    }
 

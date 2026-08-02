@@ -143,7 +143,8 @@ impl ShaderModel for ShaderModel70 {
             | Op::Vote(_)
             | Op::Copy(_)
             | Op::Pin(_)
-            | Op::Unpin(_) => true,
+            | Op::Unpin(_)
+            | Op::Ldcg(_) => true,
             Op::Ldc(op) => op.offset.is_zero(),
             // UCLEA  USHL  USHR
             _ => false,
@@ -175,6 +176,7 @@ impl ShaderModel for ShaderModel70 {
                     5
                 }
             }
+            Op::Nanosleep(_) => 5,
             Op::CCtl(_op) => {
                 // CCTL.C needs 8, CCTL.I needs 11
                 11

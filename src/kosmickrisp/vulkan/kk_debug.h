@@ -18,6 +18,16 @@ extern enum kk_debug kk_mesa_debug_flags;
 
 #define KK_DEBUG(flag) unlikely(kk_mesa_debug_flags &KK_DEBUG_##flag)
 
+enum kk_experimental {
+   /* Advertise custom border features */
+   KK_EXPERIMENTAL_CUSTOM_BORDER = 1ull << 0,
+};
+
+extern enum kk_experimental kk_mesa_experimental_flags;
+
+#define KK_EXPERIMENTAL(flag)                                                  \
+   unlikely(kk_mesa_experimental_flags &KK_EXPERIMENTAL_##flag)
+
 extern void kk_process_debug_variable(void);
 
 #endif /* KK_DEBUG_H */

@@ -108,7 +108,7 @@ const nir_shader_compiler_options *pco_nir_options(void)
  * \param[in] bindless Whether the access is bindless.
  * \return The size.
  */
-static int glsl_type_size(const struct glsl_type *type, UNUSED bool bindless)
+static unsigned glsl_type_size(const struct glsl_type *type, UNUSED bool bindless)
 {
    return glsl_count_attribute_slots(type, false);
 }
@@ -529,13 +529,15 @@ static bool check_mem_writes(nir_builder *b,
  */
 void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
 {
+   bool internal = nir->info.internal;
+
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       nir_shader_intrinsics_pass(nir, check_mem_writes, nir_metadata_all, NULL);
 
-   if (nir->info.stage == MESA_SHADER_COMPUTE)
+   if (nir->info.stage == MESA_SHADER_COMPUTE && !internal)
       NIR_PASS(_, nir, pco_nir_compute_instance_check);
 
-   if (nir->info.internal)
+   if (internal)
       NIR_PASS(_, nir, nir_lower_returns);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -545,6 +547,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
          .primitive_id = nir->info.stage == MESA_SHADER_FRAGMENT,
       };
       NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
+      NIR_PASS(_, nir, nir_lower_system_values);
       NIR_PASS(_, nir, nir_lower_helper_writes, true);
       NIR_PASS(_, nir, nir_lower_is_helper_invocation);
       NIR_PASS(_, nir, nir_lower_terminate_to_demote);
@@ -562,6 +565,26 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
                   .lower_cs_local_id_to_index = true,
                });
    }
+
+   NIR_PASS(_, nir, nir_lower_subgroups, &(nir_lower_subgroups_options){
+         .subgroup_size = ROGUE_MAX_INSTANCES_PER_TASK,
+         .ballot_bit_size = 32,
+         .ballot_components = 1,
+         .lower_to_scalar = true,
+         .lower_vote_feq = true,
+         .lower_vote_ieq = true,
+         .lower_vote_bool_eq = true,
+         .lower_read_first_invocation = true,
+         .lower_subgroup_masks = true,
+         .lower_relative_shuffle = true,
+         .lower_quad_vote = true,
+         .lower_elect = true,
+         .lower_rotate_to_shuffle = true,
+         .lower_rotate_clustered_to_shuffle = true,
+         .lower_inverse_ballot = true,
+         .lower_boolean_reduce = true,
+         .lower_boolean_shuffle = true,
+      });
 
    NIR_PASS(_, nir, pco_nir_lower_subgroups);
 
@@ -594,7 +617,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
 
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
-   if (!nir->info.internal) {
+   if (!internal) {
       /* TODO: test with different size_threshold values. */
       NIR_PASS(_,
                nir,
@@ -625,7 +648,7 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
 
    NIR_PASS(_, nir, nir_remove_dead_derefs);
    NIR_PASS(_, nir, nir_opt_undef);
-   NIR_PASS(_, nir, nir_lower_undef_to_zero);
+   NIR_PASS(_, nir, nir_lower_undef_to_zero, NULL);
    NIR_PASS(_, nir, nir_opt_cse);
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_,
@@ -818,6 +841,8 @@ static inline bool should_spill_shmem(const pco_ctx *ctx, unsigned shared_size)
  */
 void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 {
+   bool internal = nir->info.internal;
+
    NIR_PASS(_,
             nir,
             nir_opt_access,
@@ -835,6 +860,8 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS(_, nir, nir_opt_vectorize_io_vars, nir_var_shader_out);
+
+   NIR_PASS(_, nir, pco_nir_prop_access);
 
    NIR_PASS(_,
             nir,
@@ -918,11 +945,11 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
    NIR_PASS(_, nir, nir_opt_constant_folding);
 
    /* Internal shaders will be using invalid32 types at this stage. */
-   if (!nir->info.internal)
+   if (!internal)
       NIR_PASS(_, nir, nir_unlower_io_to_vars, true);
 
-   if (nir->info.stage == MESA_SHADER_VERTEX)
-      NIR_PASS(_, nir, pco_nir_lower_clip_cull_vars);
+   if (nir->info.stage == MESA_SHADER_VERTEX && !internal)
+      pco_nir_lower_clip_cull_vars(nir);
 
    NIR_PASS(_, nir, pco_nir_lower_images, data, ctx);
    NIR_PASS(_, nir, pco_nir_lower_atomics, data);
@@ -936,7 +963,9 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
    NIR_PASS(_, nir, pco_nir_lower_tex, data, ctx);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, pco_nir_lower_alpha_to_coverage);
+
+      if (!internal)
+         NIR_PASS(_, nir, pco_nir_lower_alpha_to_coverage);
 
       NIR_PASS(_, nir, nir_lower_blend, &data->fs.blend_opts);
 
@@ -955,7 +984,7 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
                PVR_POINT_SIZE_RANGE_MIN,
                PVR_POINT_SIZE_RANGE_MAX);
 
-      if (!nir->info.internal)
+      if (!internal)
          NIR_PASS(_, nir, pco_nir_point_size);
 
       NIR_PASS(_, nir, pco_nir_pvi, &data->vs);
@@ -1086,6 +1115,8 @@ remat_load_const(nir_builder *b, nir_instr *instr, UNUSED void *cb_data)
  */
 void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 {
+   bool internal = nir->info.internal;
+
    nir_move_options move_options = nir_move_const_undef | nir_move_copies |
                                    nir_move_comparisons | nir_move_alu;
    NIR_PASS(_, nir, nir_opt_sink, move_options);
@@ -1099,6 +1130,7 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
       NIR_PASS(_, nir, pco_nir_lower_algebraic_late);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+      NIR_PASS(_, nir, nir_lower_all_phis_to_scalar);
       NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
@@ -1128,7 +1160,7 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 
    NIR_PASS(_, nir, nir_trivialize_registers);
 
-   if (!nir->info.internal) {
+   if (!internal) {
       nir_shader_instructions_pass(nir,
                                    remat_load_const,
                                    nir_metadata_none,

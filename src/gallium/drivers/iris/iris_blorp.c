@@ -321,8 +321,13 @@ iris_blorp_exec_render(struct blorp_batch *blorp_batch,
    }
 
    if (params->depth.enabled &&
-       !(blorp_batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL))
-      genX(emit_depth_state_workarounds)(ice, batch, &params->depth.surf);
+       !(blorp_batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL)) {
+      if (INTEL_NEEDS_WA_1808121037 && params->num_samples == 1 &&
+          params->depth.surf.format == ISL_FORMAT_R16_UNORM) {
+         /* Disable HiZ planes on D16 1x MSAA to avoid sporadic corruption. */
+         genX(batch_disable_hiz_planes)(batch);
+      }
+   }
 
    iris_require_command_space(batch, 1400);
 

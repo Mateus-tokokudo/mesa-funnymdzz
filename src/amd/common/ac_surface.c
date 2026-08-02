@@ -70,8 +70,16 @@
 	(((__u64)(value) & AMDGPU_TILING_##field##_MASK) << AMDGPU_TILING_##field##_SHIFT)
 #define AMDGPU_TILING_GET(value, field) \
 	(((__u64)(value) >> AMDGPU_TILING_##field##_SHIFT) & AMDGPU_TILING_##field##_MASK)
+
+static char *
+drmGetFormatModifierName(uint64_t modifier)
+{
+   return NULL;
+}
+
 #else
 #include "drm-uapi/amdgpu_drm.h"
+#include <xf86drm.h>
 #endif
 
 #ifndef CIASICIDGFXENGINE_SOUTHERNISLAND
@@ -623,7 +631,8 @@ bool ac_get_supported_modifiers(const struct radeon_info *info,
       ADD_MOD(DRM_FORMAT_MOD_LINEAR)
       break;
    }
-   case GFX12: {
+   case GFX12:
+   case GFX12_1: {
       /* Chip properties no longer affect tiling, and there is no distinction between displayable
        * and non-displayable anymore. (DCC settings may affect displayability though)
        *
@@ -2821,8 +2830,7 @@ static int gfx9_compute_surface(struct ac_addrlib *addrlib, const struct radeon_
 
       case RADEON_SURF_MODE_1D:
       case RADEON_SURF_MODE_2D:
-         if (surf->flags & RADEON_SURF_IMPORTED ||
-             (info->gfx_level >= GFX10 && surf->flags & RADEON_SURF_FORCE_SWIZZLE_MODE)) {
+         if (surf->flags & (RADEON_SURF_IMPORTED | RADEON_SURF_FORCE_SWIZZLE_MODE)) {
             AddrSurfInfoIn.swizzleMode = surf->u.gfx9.swizzle_mode;
             break;
          }
@@ -4879,6 +4887,12 @@ void ac_surface_print_info(FILE *out, const struct radeon_info *info,
               1 << surf->surf_alignment_log2, surf->u.gfx9.swizzle_mode, surf->tile_swizzle,
               surf->u.gfx9.epitch, surf->u.gfx9.surf_pitch,
               surf->blk_w, surf->blk_h, surf->bpe, surf->flags);
+
+      if (surf->modifier != DRM_FORMAT_MOD_INVALID) {
+         char *name = drmGetFormatModifierName(surf->modifier);
+         fprintf(out, "    Modifier: %s\n", name);
+         free(name);
+      }
 
       if (surf->fmask_offset)
          fprintf(out,

@@ -1,6 +1,8 @@
 # Copyright ©
 # SPDX-License-Identifier: MIT
 
+subdir('builtin_kernels')
+
 libmesa_rust_util_files = files(
   'util/lib.rs',
   'util/assert.rs',
@@ -54,6 +56,7 @@ rusticl_files = files(
   'core/format.rs',
   'core/kernel.rs',
   'core/memory.rs',
+  'core/meta.rs',
   'core/platform.rs',
   'core/program.rs',
   'core/queue.rs',
@@ -281,6 +284,7 @@ rusticl_mesa_bindings = rust.bindgen(
     '--allowlist-function',     'util_queue_.*',
     '--allowlist-function',     'util_vma_.*',
     '--allowlist-function',     'util_get_cpu_caps',
+    '--allowlist-function',     'util_perfetto_thread_flush',
     '--no-copy',                'util_vma_heap', # it's a linked list
     '--no-copy',                'util_queue',
     '--no-copy',                'util_queue_fence',
@@ -327,6 +331,7 @@ rusticl_mesa_bindings = rust.bindgen(
     '--constified-enum-module', 'pipe_tex_wrap',
     '--allowlist-type',         'pipe_swizzle',
     '--constified-enum-module', 'pipe_swizzle',
+    '--blocklist-function',     'pipe_shader_state_from_tgsi',
 
     # rusticl C functions
     '--allowlist-function',     'rusticl_.*',
@@ -444,6 +449,7 @@ librusticl = static_library(
     rusticl_llvm_gen,
     rusticl_opencl_gen,
     rusticl_proc_macros,
+    rusticl_kernels_spv,
   ],
 )
 

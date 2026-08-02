@@ -228,7 +228,8 @@ genX(emit_simpler_shader_init_fragment)(struct anv_simple_shader *state)
 #endif
 
 #if GFX_VER >= 30
-      ps.RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used);
+      ps.RegistersPerThread =
+         brw_register_blocks(device->info, prog_data->base.grf_used);
 #endif
 
       ps.MaximumNumberofThreadsPerPSD = device->info->max_threads_per_psd - 1;
@@ -452,14 +453,14 @@ genX(simple_shader_push_state_address)(struct anv_simple_shader *state,
 {
    if (state->kernel->stage == MESA_SHADER_FRAGMENT) {
       return anv_state_pool_state_address(
-         &state->device->dynamic_state_pool, push_state);
+         anv_device_get_dynamic_state_pool(state->device), push_state);
    } else {
 #if GFX_VERx10 >= 125
       return anv_state_pool_state_address(
-         &state->device->general_state_pool, push_state);
+         anv_device_get_general_state_pool(state->device), push_state);
 #else
       return anv_state_pool_state_address(
-         &state->device->dynamic_state_pool, push_state);
+         anv_device_get_dynamic_state_pool(state->device), push_state);
 #endif
    }
 }
@@ -473,7 +474,7 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
    struct anv_device *device = state->device;
    struct anv_batch *batch = state->batch;
    struct anv_address push_addr =
-      anv_state_pool_state_address(&device->dynamic_state_pool, push_state);
+      anv_state_pool_state_address(anv_device_get_dynamic_state_pool(device), push_state);
 
    if (state->kernel->stage == MESA_SHADER_FRAGMENT) {
       /* At the moment we require a command buffer associated with this
@@ -497,7 +498,7 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
       vertices[6] = x0; vertices[7] = y0; vertices[8] = z; /* v2 */
 
       struct anv_address vs_data_address =
-         anv_state_pool_state_address(&device->dynamic_state_pool, vs_data_state);
+         anv_state_pool_state_address(anv_device_get_dynamic_state_pool(device), vs_data_state);
       uint32_t *dw = anv_batch_emitn(batch,
                                      1 + GENX(VERTEX_BUFFER_STATE_length),
                                      GENX(3DSTATE_VERTEX_BUFFERS));
@@ -583,6 +584,7 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
 
       intel_compute_engine_async_threads_limit(devinfo, dispatch.threads,
                                                slm_or_barrier_enabled,
+                                               prog_data->uses_fence,
                                                &pixel_async_compute_thread_limit,
                                                &z_pass_async_compute_thread_limit,
                                                &np_z_async_throttle_settings);
@@ -640,7 +642,8 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
                                                                                prog_data->base.total_shared),
             .NumberOfBarriers                  = prog_data->uses_barrier,
 #if GFX_VER >= 30
-            .RegistersPerThread = ptl_register_blocks(prog_data->base.grf_used),
+            .RegistersPerThread =
+               brw_register_blocks(devinfo, prog_data->base.grf_used),
 #endif
          },
       };
@@ -652,13 +655,7 @@ genX(emit_simple_shader_dispatch)(struct anv_simple_shader *state,
       if (state->cmd_buffer) {
          genX(cmd_buffer_post_dispatch_wa)(state->cmd_buffer);
       } else {
-#if INTEL_NEEDS_WA_14025112257
-         if (batch->engine_class == INTEL_ENGINE_CLASS_COMPUTE) {
-            genX(batch_emit_pipe_control)(batch, devinfo, GPGPU,
-                                          ANV_PIPE_STATE_CACHE_INVALIDATE_BIT,
-                                          "Wa_14025112257");
-         }
-#endif
+         genX(batch_emit_post_dispatch_wa)(batch);
       }
 
 #else /* GFX_VERx10 < 125 */

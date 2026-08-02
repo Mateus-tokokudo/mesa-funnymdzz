@@ -376,8 +376,8 @@ nir_intrinsic_writes_external_memory(const nir_intrinsic_instr *instr)
    case nir_intrinsic_ssbo_atomic_ir3:
    case nir_intrinsic_ssbo_atomic_swap_ir3:
    case nir_intrinsic_store_global:
+   case nir_intrinsic_store_global_offset:
    case nir_intrinsic_store_global_etna:
-   case nir_intrinsic_store_global_ir3:
    case nir_intrinsic_store_global_amd:
    case nir_intrinsic_store_buffer_amd:
    case nir_intrinsic_store_ssbo:
@@ -874,6 +874,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
       shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
       break;
 
+   case nir_intrinsic_load_tile_image:
    case nir_intrinsic_load_tile_pan:
    case nir_intrinsic_load_tile_res_pan: {
       const nir_io_semantics io = nir_intrinsic_io_semantics(instr);

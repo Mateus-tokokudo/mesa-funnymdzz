@@ -138,7 +138,7 @@ CDX12EncHMFT::UpdateH264EncPictureDesc( pipe_h264_enc_picture_desc *pPicInfo, co
    */
 
    pPicInfo->seq.pic_order_cnt_type = ( ip_period > 2 ) ? 0u : 2u;   // 2 consecutive non reference frames -> 0u
-   pPicInfo->seq.log2_max_frame_num_minus4 = 4;
+   pPicInfo->seq.log2_max_frame_num_minus4 = AVC_LOG2_MAX_FRAME_NUM_MINUS4;
    pPicInfo->seq.log2_max_pic_order_cnt_lsb_minus4 = pPicInfo->seq.log2_max_frame_num_minus4 + 1;
 
    pPicInfo->seq.num_temporal_layers = m_bLayerCountSet ? HMFT_MAX_TEMPORAL_LAYERS : 1;
@@ -348,12 +348,17 @@ CDX12EncHMFT::PrepareForEncodeHelper( LPDX12EncodeContext pDX12EncodeContext,
          pPicInfo->slice.ref_pic_marking_operations[i] = cur_frame_desc->mmco_operations[i];
    }
 
+   if( !m_EncoderCapabilities.m_bHWSupportsAppControlledSlicePartitioning && m_EncoderCapabilities.m_bHWSupportSliceModeAuto )
+   {
+      pPicInfo->slice_mode = PIPE_VIDEO_SLICE_MODE_AUTO;
+   }
+
    if( m_uiDirtyRectEnabled )
    {
       if( dirtyRectFrameNumSet )
       {
          DIRTYRECT_INFO *pDirtyRectInfo = (DIRTYRECT_INFO *) m_pDirtyRectBlob.data();
-         UINT uiNumDirtyRects = min( pDirtyRectInfo->NumDirtyRects, (UINT) PIPE_ENC_DIRTY_RECTS_NUM_MAX );
+         UINT uiNumDirtyRects = std::min( pDirtyRectInfo->NumDirtyRects, (UINT) PIPE_ENC_DIRTY_RECTS_NUM_MAX );
 
          if( uiNumDirtyRects > 0 )
          {

@@ -730,8 +730,7 @@ nir_replace_instr(nir_builder *build, nir_alu_instr *instr,
    /* Note that NIR builder will elide the MOV if it's a no-op, which may
     * allow more work to be done in a single pass through algebraic.
     */
-   nir_def *mov = nir_def_rewrite_uses_with_alu_src(build, &instr->def, val,
-                                                    instr->def.num_components);
+   nir_def *mov = nir_def_rewrite_uses_with_alu_src(build, &instr->def, val);
 
    if (mov) {
       util_dynarray_append_typed(states, uint16_t, 0);

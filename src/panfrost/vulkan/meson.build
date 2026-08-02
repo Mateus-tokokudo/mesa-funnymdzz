@@ -20,6 +20,19 @@ panvk_entrypoints = custom_target(
   depend_files : vk_entrypoints_gen_depend_files,
 )
 
+panvk_drirc = custom_target(
+  'panvk_drirc',
+  input  : [files('panvk_drirc_gen.py'), drirc_gen, '00-panvk-defaults.conf'],
+  output : ['panvk_drirc.c', 'panvk_drirc.h'],
+  command : [
+    prog_python, '@INPUT0@',
+    '--import-path', join_paths(dir_source_root, 'src/util'),
+    '--drirc-src', '@OUTPUT0@',
+    '--drirc-hdr', '@OUTPUT1@',
+    '--validate', '@INPUT2@',
+  ],
+)
+
 panvk_tracepoints = custom_target(
   'panvk_tracepoints.[ch]',
   input: 'panvk_tracepoints.py',
@@ -37,6 +50,8 @@ panvk_tracepoints = custom_target(
 )
 
 libpanvk_files = files(
+  'panvk_async_bind.c',
+  'panvk_bind_queue.c',
   'panvk_buffer.c',
   'panvk_cmd_pool.c',
   'panvk_device_memory.c',
@@ -44,9 +59,9 @@ libpanvk_files = files(
   'panvk_image.c',
   'panvk_instance.c',
   'panvk_mempool.c',
+  'panvk_nir_lower_tile_image.c',
   'panvk_physical_device.c',
   'panvk_priv_bo.c',
-  'panvk_sparse.c',
   'panvk_utrace.c',
   'panvk_wsi.c',
 )
@@ -73,7 +88,6 @@ fifthgen_files = []
 jm_archs = [6, 7]
 jm_inc_dir = ['jm']
 jm_files = [
-  'jm/panvk_vX_bind_queue.c',
   'jm/panvk_vX_cmd_buffer.c',
   'jm/panvk_vX_cmd_dispatch.c',
   'jm/panvk_vX_cmd_draw.c',
@@ -87,7 +101,6 @@ jm_files = [
 csf_archs = [10, 12, 13, 14]
 csf_inc_dir = ['csf']
 csf_files = [
-  'csf/panvk_vX_bind_queue.c',
   'csf/panvk_vX_cmd_buffer.c',
   'csf/panvk_vX_cmd_cond_render.c',
   'csf/panvk_vX_cmd_dispatch.c',
@@ -106,6 +119,7 @@ csf_files = [
 common_per_arch_files = [
   panvk_entrypoints[0],
   panvk_tracepoints[0],
+  panvk_drirc[1],
   'panvk_vX_blend.c',
   'panvk_vX_buffer_view.c',
   'panvk_vX_cmd_desc_state.c',
@@ -191,7 +205,7 @@ endif
 
 libvulkan_panfrost = shared_library(
   'vulkan_panfrost',
-  [libpanvk_files, panvk_entrypoints, panvk_tracepoints],
+  [libpanvk_files, panvk_entrypoints, panvk_tracepoints, panvk_drirc],
   include_directories : [
     inc_include,
     inc_src,
@@ -221,10 +235,12 @@ libvulkan_panfrost = shared_library(
   ],
   c_args : [no_override_init_args, panvk_flags, soong_compat_c_args],
   link_args : [vulkan_icd_link_args, ld_args_bsymbolic, ld_args_gc_sections, ld_args_build_id],
+  link_depends: vulkan_icd_link_depends,
   gnu_symbol_visibility : 'hidden',
   install : true,
 )
 
+# TODO: Re-enable the symbol check with Kraid
 if with_symbols_check
   test(
     'panvk symbols check',

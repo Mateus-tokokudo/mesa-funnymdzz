@@ -734,7 +734,8 @@
   </struct>
 
   <struct name="CS NOP" size="2">
-    <field name="Ignored" size="56" start="0" type="hex"/>
+    <field name="Metadata payload" size="48" start="0" type="hex"/>
+    <field name="Metadata type" size="8" start="48" type="hex"/>
     <field name="Opcode" size="8" start="56" type="CS Opcode" default="NOP"/>
   </struct>
 
@@ -1444,6 +1445,15 @@
     <value name="OQ" value="64"/>
   </enum>
 
+  <enum name="FULLSCREEN SR">
+    <value name="TILER_CTX" value="40"/>
+    <value name="SCISSOR_BOX" value="42"/>
+    <value name="TILER_FLAGS" value="56"/>
+    <value name="TILER_DCD_FLAGS0" value="57"/>
+    <value name="TILER_DCD_FLAGS1" value="58"/>
+    <value name="TILER_DCD_FLAGS2" value="59"/>
+  </enum>
+
   <enum name="FRAGMENT SR">
     <value name="ITER_TRACE_ID0" value="0"/>
     <value name="ITER_TRACE_ID1" value="1"/>
@@ -1636,7 +1646,7 @@
     <field name="Layer index enable" size="1" start="0:20" type="bool"/>
     <field name="Scissor array enable" size="1" start="0:21" type="bool"/>
     <field name="Position FIFO format" size="2" start="0:22" type="FIFO format"/>
-    <field name="View mask" size="8" start="0:24" type="hex"/>
+    <field name="Layer index" size="8" start="0:24" type="uint"/>
   </struct>
 
   <enum name="VRS Draw Rate">
@@ -1663,6 +1673,7 @@
     <field name="VRS Draw Rate" size="4" start="0:0" type="VRS Draw Rate" default="1x1"/>
     <field name="VRS Combiner 0" size="3" start="0:4" type="VRS Combiner" default="Keep"/>
     <field name="VRS Combiner 1" size="3" start="0:7" type="VRS Combiner" default="Keep"/>
+    <field name="View mask" size="16" start="0:16" type="hex"/>
   </struct>
 
   <struct name="Primitive">

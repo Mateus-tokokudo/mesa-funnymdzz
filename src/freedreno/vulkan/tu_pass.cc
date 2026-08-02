@@ -741,6 +741,16 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
    if (pass->attachment_count == 0)
       return;
 
+   bool custom_resolve_depth_stencil = false;
+   for (uint32_t i = 0; i < pass->subpass_count; i++) {
+      const struct tu_subpass *subpass = &pass->subpasses[i];
+      if (subpass->custom_resolve && subpass->depth_stencil_attachment.attachment != VK_ATTACHMENT_UNUSED &&
+          (subpass->depth_used || subpass->stencil_used)) {
+         custom_resolve_depth_stencil = true;
+         break;
+      }
+   }
+
    for (enum tu_gmem_layout layout = (enum tu_gmem_layout) 0;
         layout < TU_GMEM_LAYOUT_COUNT;
         layout = (enum tu_gmem_layout)(layout + 1)) {
@@ -808,11 +818,15 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
        * result:  nblocks = {12, 52}, pixels = 196608
        * optimal: nblocks = {13, 51}, pixels = 208896
        */
-      uint32_t gmem_size = layout == TU_GMEM_LAYOUT_FULL
-                              ? phys_dev->usable_gmem_size_gmem
-                              : phys_dev->config_gmem.color_ccu_offset;
+      uint32_t gmem_size = phys_dev->usable_gmem_size_gmem;
+      if (layout == TU_GMEM_LAYOUT_AVOID_CCU) {
+         gmem_size = MIN2(gmem_size, phys_dev->config_gmem.color_ccu_offset);
+         if (custom_resolve_depth_stencil)
+            gmem_size = MIN2(gmem_size, phys_dev->config_gmem.depth_ccu_offset);
+      }
       uint32_t gmem_blocks = gmem_size / gmem_align;
       uint32_t offset = 0, pixels = ~0u, i;
+      bool layout_impossible = false;
       for (i = 0; i < num_gmem_alloc; i++) {
          struct tu_gmem_alloc *alloc = &gmem_alloc[i];
 
@@ -821,8 +835,8 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
 
          if (nblocks > gmem_blocks) {
             /* gmem layout impossible */
-            pass->gmem_pixels[layout] = 0;
-            continue;
+            layout_impossible = true;
+            break;
          }
 
          gmem_blocks -= nblocks;
@@ -830,6 +844,12 @@ tu_render_pass_gmem_config(struct tu_render_pass *pass,
          alloc->gmem_offset = offset;
          offset += nblocks * gmem_align;
          pixels = MIN2(pixels, nblocks * gmem_align / alloc->cpp);
+      }
+
+      /* Impossible layouts have no valid GMEM offsets. */
+      if (layout_impossible) {
+         pass->gmem_pixels[layout] = 0;
+         continue;
       }
 
       pass->gmem_pixels[layout] = pixels;
@@ -883,7 +903,7 @@ attachment_set_ops(struct tu_device *device,
                    VkAttachmentStoreOp store_op,
                    VkAttachmentStoreOp stencil_store_op)
 {
-   if (unlikely(device->instance->dont_care_as_load)) {
+   if (unlikely(device->instance->drirc.debug.dont_care_as_load)) {
       if (load_op == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
          load_op = VK_ATTACHMENT_LOAD_OP_LOAD;
       if (stencil_load_op == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
@@ -1244,6 +1264,7 @@ tu_CreateRenderPass2(VkDevice _device,
                   subpass->resolve_attachments[j].attachment = a;
                   subpass->unresolve_attachments[j].attachment = a;
                   subpass->color_attachments[j].attachment = a = msrtss_att_idx++;
+                  pass->has_msrtss = true;
                }
 
                tu_subpass_use_attachment(pass, i, a, pCreateInfo);
@@ -1294,6 +1315,7 @@ tu_CreateRenderPass2(VkDevice _device,
             subpass->unresolve_attachments[subpass->resolve_count - 1].attachment = a;
             subpass->depth_stencil_attachment.attachment = a = msrtss_att_idx++;
             subpass->resolve_depth_stencil = true;
+            pass->has_msrtss = true;
          }
 
          tu_subpass_use_attachment(pass, i, a, pCreateInfo);
@@ -1511,7 +1533,8 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
          subpass->srgb_cntl |= 1 << i;
 
       if (!att_is_msrtss) {
-         if (att_info->resolveMode != VK_RESOLVE_MODE_NONE) {
+         if (att_info->resolveMode != VK_RESOLVE_MODE_NONE &&
+             att_info->resolveImageView) {
             struct tu_render_pass_attachment *resolve_att = &pass->attachments[a];
             VK_FROM_HANDLE(tu_image_view, resolve_view, att_info->resolveImageView);
             tu_setup_dynamic_attachment(resolve_att, resolve_view,
@@ -1538,6 +1561,9 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
             att->will_be_resolved = false;
          }
       }
+
+      if (att_is_msrtss)
+         pass->has_msrtss = true;
    }
 
    if (info->pDepthAttachment || info->pStencilAttachment) {
@@ -1618,7 +1644,8 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
          }
 
          if (!att_is_msrtss) {
-            if (common_info->resolveMode != VK_RESOLVE_MODE_NONE) {
+            if (common_info->resolveMode != VK_RESOLVE_MODE_NONE &&
+                common_info->resolveImageView) {
                struct tu_render_pass_attachment *resolve_att = &pass->attachments[a];
                VK_FROM_HANDLE(tu_image_view, resolve_view,
                               common_info->resolveImageView);
@@ -1647,6 +1674,9 @@ tu_setup_dynamic_render_pass(struct tu_cmd_buffer *cmd_buffer,
                att->will_be_resolved = false;
             }
          }
+
+         if (att_is_msrtss)
+            pass->has_msrtss = true;
       } else {
          subpass->depth_stencil_attachment.attachment = VK_ATTACHMENT_UNUSED;
          subpass->input_attachments[0].attachment = VK_ATTACHMENT_UNUSED;

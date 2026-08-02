@@ -37,11 +37,7 @@
 #include <unordered_set>
 
 #ifdef HAVE_PERFETTO
-#ifndef ANDROID_LIBPERFETTO
-#include <perfetto.h>
-#else
-#include <perfetto/tracing.h>
-#endif
+#include "util/perf/u_perfetto.h"
 
 #define GFXSTREAM_TRACE_DEFAULT_CATEGORY "gfxstream.default"
 
@@ -92,6 +88,20 @@ static T vk_make_orphan_copy(const T& vk_struct) {
     return copy;
 }
 
+template <class T>
+T* vk_extract_struct(void* start, VkStructureType sType) {
+    auto* curr = reinterpret_cast<VkBaseOutStructure*>(start);
+    while (curr && curr->pNext) {
+        if (curr->pNext->sType == sType) {
+            auto* extracted = curr->pNext;
+            curr->pNext = extracted->pNext;
+            extracted->pNext = nullptr;
+            return reinterpret_cast<T*>(extracted);
+        }
+        curr = curr->pNext;
+    }
+    return nullptr;
+}
 
 namespace gfxstream {
 namespace vk {
@@ -315,7 +325,7 @@ VkDescriptorImageInfo ResourceTracker::filterNonexistentSampler(
     return res;
 }
 
-void ResourceTracker::emitDeviceMemoryReport(VkDevice_Info info,
+void ResourceTracker::emitDeviceMemoryReport(const VkDevice_Info& info,
                                              VkDeviceMemoryReportEventTypeEXT type,
                                              uint64_t memoryObjectId, VkDeviceSize size,
                                              VkObjectType objectType, uint64_t objectHandle,
@@ -1339,8 +1349,8 @@ void ResourceTracker::setInstanceInfo(VkInstance instance, uint32_t enabledExten
 }
 
 void ResourceTracker::setDeviceInfo(VkDevice device, VkPhysicalDevice physdev,
-                                    VkPhysicalDeviceProperties props,
-                                    VkPhysicalDeviceMemoryProperties memProps,
+                                    const VkPhysicalDeviceProperties& props,
+                                    const VkPhysicalDeviceMemoryProperties& memProps,
                                     uint32_t enabledExtensionCount,
                                     const char* const* ppEnabledExtensionNames, const void* pNext) {
     std::lock_guard<std::recursive_mutex> lock(mLock);
@@ -1794,6 +1804,7 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
         "VK_EXT_swapchain_colorspace",
         "VK_EXT_image_robustness",
         "VK_EXT_custom_border_color",
+        "VK_EXT_border_color_swizzle",
         "VK_EXT_shader_stencil_export",
         "VK_KHR_image_format_list",
         "VK_KHR_incremental_present",
@@ -1878,7 +1889,8 @@ VkResult ResourceTracker::on_vkEnumerateDeviceExtensionProperties(
 
         // Android requirements
         "VK_EXT_pipeline_protected_access",
-        "VK_KHR_maintenance6",
+        // TODO(b/514638991): Serialization bugs in maintenance6 extension
+        // "VK_KHR_maintenance6",
         "VK_KHR_maintenance7",
         "VK_KHR_maintenance8",
         "VK_KHR_maintenance9",
@@ -2188,60 +2200,49 @@ void ResourceTracker::on_vkGetPhysicalDeviceProperties2(void* context,
         return;
     }
 
-    void* pNextOriginal = pProperties->pNext;
-    VkPhysicalDeviceProperties2 localProps = *pProperties;
-
-    if (vk_find_struct(&localProps, PHYSICAL_DEVICE_DRM_PROPERTIES_EXT)) {
-        vk_filter_struct(&localProps, PHYSICAL_DEVICE_DRM_PROPERTIES_EXT);
-    }
-
-    if (vk_find_struct(&localProps, PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT)) {
-        vk_filter_struct(&localProps, PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT);
-    }
-
-    if (vk_find_struct(&localProps, PHYSICAL_DEVICE_DRIVER_PROPERTIES)) {
-        vk_filter_struct(&localProps, PHYSICAL_DEVICE_DRIVER_PROPERTIES);
-    }
-
-    if (vk_find_struct(&localProps, PHYSICAL_DEVICE_ID_PROPERTIES)) {
-        vk_filter_struct(&localProps, PHYSICAL_DEVICE_ID_PROPERTIES);
-    }
-
+    // Safely extract guest-only structures from the pNext chain before calling the host encoder.
+    auto* drmProps = vk_extract_struct<VkPhysicalDeviceDrmPropertiesEXT>(
+        pProperties, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT);
+    auto* pciProps = vk_extract_struct<VkPhysicalDevicePCIBusInfoPropertiesEXT>(
+        pProperties, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT);
 #if defined(VK_USE_PLATFORM_ANDROID_KHR)
-    if (vk_find_struct(&localProps, PHYSICAL_DEVICE_PRESENTATION_PROPERTIES_ANDROID)) {
-        vk_filter_struct(&localProps, PHYSICAL_DEVICE_PRESENTATION_PROPERTIES_ANDROID);
-    }
+    auto* presentationProps = vk_extract_struct<VkPhysicalDevicePresentationPropertiesANDROID>(
+        pProperties, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENTATION_PROPERTIES_ANDROID);
 #endif
 
-    enc->vkGetPhysicalDeviceProperties2(physicalDevice, &localProps, false /* no lock */);
-
-    *pProperties = localProps;
-    pProperties->pNext = pNextOriginal;
-
-    if (pProperties->properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
-        pProperties->properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
-    }
-
-    pProperties->properties.driverVersion = vk_get_driver_version();
-    VkPhysicalDeviceVulkan12Properties* vulkan12Props =
-        vk_find_struct(pProperties, PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES);
-    if (vulkan12Props) {
-        snprintf(vulkan12Props->driverName, sizeof(vulkan12Props->driverName), "gfxstream");
-        snprintf(vulkan12Props->driverInfo, sizeof(vulkan12Props->driverInfo),
-                 "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
-    }
-
-    VkPhysicalDeviceDriverProperties* driverProps =
+    // Always request VkPhysicalDeviceDriverProperties to name the driver correctly
+    VkPhysicalDeviceDriverProperties driverPropsLocal = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceDriverProperties* hostDriverProps =
         vk_find_struct(pProperties, PHYSICAL_DEVICE_DRIVER_PROPERTIES);
-    if (driverProps) {
-#if DETECT_OS_ANDROID
-        //TODO(b/502904616): change with VK_DRIVER_ID_MESA_GFXSTREAM when the headers are updated
-        driverProps->driverID = VK_DRIVER_ID_MESA_LLVMPIPE;
-#endif
-        snprintf(driverProps->driverName, sizeof(driverProps->driverName), "gfxstream");
-        snprintf(driverProps->driverInfo, sizeof(driverProps->driverInfo),
-                 "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
+    if (!hostDriverProps) {
+        hostDriverProps = &driverPropsLocal;
+        __vk_append_struct(pProperties, &driverPropsLocal);
     }
+
+    enc->vkGetPhysicalDeviceProperties2(physicalDevice, pProperties, false /* no lock */);
+
+    // Filter driver properties from the pNext chain if it was appended locally
+    if (hostDriverProps == &driverPropsLocal) {
+        vk_filter_struct(pProperties, PHYSICAL_DEVICE_DRIVER_PROPERTIES);
+    }
+
+    // Re-append extracted guest-only structures
+    if (drmProps) {
+        __vk_append_struct(pProperties, drmProps);
+    }
+    if (pciProps) {
+        __vk_append_struct(pProperties, pciProps);
+    }
+#if defined(VK_USE_PLATFORM_ANDROID_KHR)
+    if (presentationProps) {
+        __vk_append_struct(pProperties, presentationProps);
+    }
+#endif
+
+    // Overwrite device type and driver properties
+    pProperties->properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU;
+    pProperties->properties.driverVersion = vk_get_driver_version();
 
     const char* transport_name = instance ? "Virtio-GPU GFXStream" : "Goldfish GFXStream";
     char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
@@ -2253,39 +2254,95 @@ void ResourceTracker::on_vkGetPhysicalDeviceProperties2(void* context,
     }
     memcpy(pProperties->properties.deviceName, device_name, device_name_len + 1);
 
-    VkPhysicalDeviceDrmPropertiesEXT* drmProps =
-        vk_find_struct(pProperties, PHYSICAL_DEVICE_DRM_PROPERTIES_EXT);
-    if (instance && drmProps) {
-        VirtGpuDrmInfo drmInfo;
-        if (instance->getDrmInfo(&drmInfo)) {
-            drmProps->hasPrimary = drmInfo.hasPrimary;
-            drmProps->hasRender = drmInfo.hasRender;
-            drmProps->primaryMajor = drmInfo.primaryMajor;
-            drmProps->primaryMinor = drmInfo.primaryMinor;
-            drmProps->renderMajor = drmInfo.renderMajor;
-            drmProps->renderMinor = drmInfo.renderMinor;
-        } else {
-            mesa_logd(
-                "%s: encountered VkPhysicalDeviceDrmPropertiesEXT in pProperties::pNext chain, "
-                "but failed to query DrmInfo from the VirtGpuDevice",
-                __func__);
-        }
-    }
+    char gfxstreamDriverName[VK_MAX_DRIVER_NAME_SIZE] = "";
+    snprintf(gfxstreamDriverName, sizeof(gfxstreamDriverName), "gfxstream (%s)",
+             hostDriverProps->driverName);
+    gfxstreamDriverName[VK_MAX_DRIVER_NAME_SIZE - 1] = '\0';
 
-    VkPhysicalDevicePCIBusInfoPropertiesEXT* pciBusInfoProps =
-        vk_find_struct(pProperties, PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT);
-    if (instance && pciBusInfoProps) {
-        VirtGpuPciBusInfo pciBusInfo;
-        if (instance->getPciBusInfo(&pciBusInfo)) {
-            pciBusInfoProps->pciDomain = pciBusInfo.domain;
-            pciBusInfoProps->pciBus = pciBusInfo.bus;
-            pciBusInfoProps->pciDevice = pciBusInfo.device;
-            pciBusInfoProps->pciFunction = pciBusInfo.function;
-        } else {
-            mesa_logd(
-                "%s: encountered VkPhysicalDevicePCIBusInfoPropertiesEXT in pProperties::pNext "
-                "chain, but failed to query PciBusInfo from the VirtGpuDevice",
-                __func__);
+    auto overwrite_id_props = [](auto* props) {
+        memset(props->deviceUUID, 0, sizeof(props->deviceUUID));
+        memset(props->driverUUID, 0, sizeof(props->driverUUID));
+        memset(props->deviceLUID, 0, sizeof(props->deviceLUID));
+        props->deviceNodeMask = 0;
+        props->deviceLUIDValid = VK_FALSE;
+    };
+
+    auto overwrite_driver_props = [&](auto* props) {
+        props->driverID = VK_DRIVER_ID_MESA_GFXSTREAM;
+        memcpy(props->driverName, gfxstreamDriverName, sizeof(props->driverName));
+        snprintf(props->driverInfo, sizeof(props->driverInfo),
+                 "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
+    };
+
+    auto overwrite_drm_props = [](VirtGpuDevice* instance, auto* props) {
+        if (instance) {
+            VkPhysicalDeviceDrmPropertiesEXT* drmProps =
+                reinterpret_cast<VkPhysicalDeviceDrmPropertiesEXT*>(props);
+            VirtGpuDrmInfo drmInfo;
+            if (instance->getDrmInfo(&drmInfo)) {
+                drmProps->hasPrimary = drmInfo.hasPrimary;
+                drmProps->hasRender = drmInfo.hasRender;
+                drmProps->primaryMajor = drmInfo.primaryMajor;
+                drmProps->primaryMinor = drmInfo.primaryMinor;
+                drmProps->renderMajor = drmInfo.renderMajor;
+                drmProps->renderMinor = drmInfo.renderMinor;
+            } else {
+                mesa_logd(
+                    "%s: encountered VkPhysicalDeviceDrmPropertiesEXT in pProperties::pNext chain, "
+                    "but failed to query DrmInfo from the VirtGpuDevice",
+                    __func__);
+            }
+        }
+    };
+
+    auto overwrite_pci_bus_info_props = [](VirtGpuDevice* instance, auto* props) {
+        if (instance) {
+            VkPhysicalDevicePCIBusInfoPropertiesEXT* pciBusInfoProps =
+                reinterpret_cast<VkPhysicalDevicePCIBusInfoPropertiesEXT*>(props);
+            VirtGpuPciBusInfo pciBusInfo;
+            if (instance->getPciBusInfo(&pciBusInfo)) {
+                pciBusInfoProps->pciDomain = pciBusInfo.domain;
+                pciBusInfoProps->pciBus = pciBusInfo.bus;
+                pciBusInfoProps->pciDevice = pciBusInfo.device;
+                pciBusInfoProps->pciFunction = pciBusInfo.function;
+            } else {
+                mesa_logd(
+                    "%s: encountered VkPhysicalDevicePCIBusInfoPropertiesEXT in pProperties::pNext "
+                    "chain, but failed to query PciBusInfo from the VirtGpuDevice",
+                    __func__);
+            }
+        }
+    };
+
+    // Overwrite all of the properties with gfxstream driver info.
+    vk_foreach_struct(ext, pProperties) {
+        switch (ext->sType) {
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: {
+                overwrite_id_props(reinterpret_cast<VkPhysicalDeviceVulkan11Properties*>(ext));
+                break;
+            }
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES: {
+                overwrite_id_props(reinterpret_cast<VkPhysicalDeviceIDProperties*>(ext));
+                break;
+            }
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES: {
+                overwrite_driver_props(reinterpret_cast<VkPhysicalDeviceVulkan12Properties*>(ext));
+                break;
+            }
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: {
+                overwrite_driver_props(reinterpret_cast<VkPhysicalDeviceDriverProperties*>(ext));
+                break;
+            }
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT: {
+                overwrite_drm_props(instance, ext);
+                break;
+            }
+            case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT: {
+                overwrite_pci_bus_info_props(instance, ext);
+                break;
+            }
+            default:
+                break;
         }
     }
 }
@@ -4734,6 +4791,16 @@ VkResult ResourceTracker::on_vkCreateSampler(void* context, VkResult, VkDevice d
         vk_append_struct(&structChainIter, &localVkSamplerReductionModeCreateInfo);
     }
 
+    VkSamplerBorderColorComponentMappingCreateInfoEXT
+        localVkSamplerBorderColorComponentMappingCreateInfo;
+    const VkSamplerBorderColorComponentMappingCreateInfoEXT* samplerBorderColorComponentMappingCreateInfo =
+        vk_find_struct_const(pCreateInfo, SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT);
+    if (samplerBorderColorComponentMappingCreateInfo) {
+        localVkSamplerBorderColorComponentMappingCreateInfo =
+            vk_make_orphan_copy(*samplerBorderColorComponentMappingCreateInfo);
+        vk_append_struct(&structChainIter, &localVkSamplerBorderColorComponentMappingCreateInfo);
+    }
+
     VkEncoder* enc = (VkEncoder*)context;
     return enc->vkCreateSampler(device, &localCreateInfo, pAllocator, pSampler, true /* do lock */);
 }
@@ -4829,6 +4896,7 @@ VkResult ResourceTracker::on_vkResetFences(void* context, VkResult, VkDevice dev
     // on fence reset, close the fence fd
     // and act like we need to GetFenceFdKHR/ImportFenceFdKHR again
     std::lock_guard<std::recursive_mutex> lock(mLock);
+#if DETECT_OS_LINUX
     for (uint32_t i = 0; i < fenceCount; ++i) {
         VkFence fence = pFences[i];
         auto it = info_VkFence.find(fence);
@@ -4841,11 +4909,11 @@ VkResult ResourceTracker::on_vkResetFences(void* context, VkResult, VkDevice dev
 #if GFXSTREAM_ENABLE_GUEST_GOLDFISH
             goldfish_sync_signal(*info.syncFd);
 #endif
-
             mSyncHelper->close(*info.syncFd);
         }
         info.syncFd.reset();
     }
+#endif
 
     return res;
 }
@@ -5779,6 +5847,9 @@ VkResult ResourceTracker::on_vkCreateSemaphore(void* context, VkResult input_res
     const VkExportSemaphoreCreateInfoKHR* exportSemaphoreInfoPtr =
         vk_find_struct_const(pCreateInfo, EXPORT_SEMAPHORE_CREATE_INFO);
 
+    const VkSemaphoreTypeCreateInfo* typeCi =
+        vk_find_struct_const(pCreateInfo, SEMAPHORE_TYPE_CREATE_INFO);
+
 #ifdef VK_USE_PLATFORM_FUCHSIA
     bool exportEvent =
         exportSemaphoreInfoPtr && (exportSemaphoreInfoPtr->handleTypes &
@@ -5787,21 +5858,15 @@ VkResult ResourceTracker::on_vkCreateSemaphore(void* context, VkResult input_res
     if (exportEvent) {
         finalCreateInfo.pNext = nullptr;
         // If we have timeline semaphores externally, leave it there.
-        const VkSemaphoreTypeCreateInfo* typeCi =
-            vk_find_struct_const(pCreateInfo, SEMAPHORE_TYPE_CREATE_INFO);
         if (typeCi) finalCreateInfo.pNext = typeCi;
     }
-#endif
-
-#if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
+#elif defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
     bool exportSyncFd = exportSemaphoreInfoPtr && (exportSemaphoreInfoPtr->handleTypes &
                                                    VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
 
     if (exportSyncFd) {
         finalCreateInfo.pNext = nullptr;
         // If we have timeline semaphores externally, leave it there.
-        const VkSemaphoreTypeCreateInfo* typeCi =
-            vk_find_struct_const(pCreateInfo, SEMAPHORE_TYPE_CREATE_INFO);
         if (typeCi) finalCreateInfo.pNext = typeCi;
     }
 #endif
@@ -5828,6 +5893,7 @@ VkResult ResourceTracker::on_vkCreateSemaphore(void* context, VkResult input_res
 #ifdef VK_USE_PLATFORM_FUCHSIA
     info.eventKoid = getEventKoid(info.eventHandle);
 #endif
+    info.isTimeline = typeCi && (typeCi->semaphoreType == VK_SEMAPHORE_TYPE_TIMELINE);
 
 #if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
     if (exportSyncFd) {
@@ -6243,29 +6309,44 @@ VkResult ResourceTracker::vkQueueSubmitEnc(VkEncoder* enc, VkQueue queue, uint32
     }
 }
 
-static void pruneWaitSemaphores(const std::vector<VkSemaphore> toRemove,
-    VkSubmitInfo& submitInfo,
-    const VkTimelineSemaphoreSubmitInfo* currTssi,
-    std::vector<VkSemaphore>& newSemList,
-    std::vector<VkPipelineStageFlags>& newWaitDstStageMaskList,
-    VkTimelineSemaphoreSubmitInfo& newTssi,
-    std::vector<uint64_t>& newSemValueList)
-{
+static void pruneWaitSemaphores(const std::vector<VkSemaphore>& toRemove, VkSubmitInfo& submitInfo,
+                                const VkTimelineSemaphoreSubmitInfo* currTssi,
+                                std::vector<VkSemaphore>& newSemList,
+                                std::vector<VkPipelineStageFlags>& newWaitDstStageMaskList,
+                                VkTimelineSemaphoreSubmitInfo& newTssi,
+                                std::vector<uint64_t>& newSemValueList) {
     newSemList.clear();
     newSemValueList.clear();
+    newWaitDstStageMaskList.clear();
+
+    if (!submitInfo.pWaitSemaphores) {
+        submitInfo.waitSemaphoreCount = 0;
+        submitInfo.pWaitSemaphores = nullptr;
+        submitInfo.pWaitDstStageMask = nullptr;
+        return;
+    }
+
     for (uint32_t i = 0; i < submitInfo.waitSemaphoreCount; i++) {
         auto it = std::find(toRemove.begin(), toRemove.end(), submitInfo.pWaitSemaphores[i]);
         if (it == toRemove.end()) {
             newSemList.push_back(submitInfo.pWaitSemaphores[i]);
-            newWaitDstStageMaskList.push_back(submitInfo.pWaitDstStageMask[i]);
-            if (currTssi) {
+
+            if (submitInfo.pWaitDstStageMask) {
+                newWaitDstStageMaskList.push_back(submitInfo.pWaitDstStageMask[i]);
+            }
+
+            if (currTssi && currTssi->pWaitSemaphoreValues &&
+                i < currTssi->waitSemaphoreValueCount) {
                 newSemValueList.push_back(currTssi->pWaitSemaphoreValues[i]);
             }
         }
     }
+
     submitInfo.waitSemaphoreCount = static_cast<uint32_t>(newSemList.size());
-    submitInfo.pWaitSemaphores = newSemList.data();
-    submitInfo.pWaitDstStageMask = newWaitDstStageMaskList.data();
+    submitInfo.pWaitSemaphores = newSemList.empty() ? nullptr : newSemList.data();
+    submitInfo.pWaitDstStageMask =
+        newWaitDstStageMaskList.empty() ? nullptr : newWaitDstStageMaskList.data();
+
     if (newSemValueList.size() > 0) {
         newTssi.waitSemaphoreValueCount = static_cast<uint32_t>(newSemValueList.size());
         newTssi.pWaitSemaphoreValues = newSemValueList.data();
@@ -6273,14 +6354,12 @@ static void pruneWaitSemaphores(const std::vector<VkSemaphore> toRemove,
     }
 }
 
-static void pruneWaitSemaphores(const std::vector<VkSemaphore> toRemove,
-    VkSubmitInfo2& submitInfo,
-    const VkTimelineSemaphoreSubmitInfo* currTssi,
-    std::vector<VkSemaphoreSubmitInfo>& newSemList,
-    std::vector<VkPipelineStageFlags>& newWaitDstStageMaskList,
-    VkTimelineSemaphoreSubmitInfo& newTssi,
-    std::vector<uint64_t>& newSemValueList)
-{
+static void pruneWaitSemaphores(const std::vector<VkSemaphore>& toRemove, VkSubmitInfo2& submitInfo,
+                                const VkTimelineSemaphoreSubmitInfo* currTssi,
+                                std::vector<VkSemaphoreSubmitInfo>& newSemList,
+                                std::vector<VkPipelineStageFlags>& newWaitDstStageMaskList,
+                                VkTimelineSemaphoreSubmitInfo& newTssi,
+                                std::vector<uint64_t>& newSemValueList) {
     // All of this info is contained in VkSubmitInfo2, so goes unused in this implementation
     // of pruneWaitSemaphores
     (void)newWaitDstStageMaskList;
@@ -6288,7 +6367,8 @@ static void pruneWaitSemaphores(const std::vector<VkSemaphore> toRemove,
     (void)newSemValueList;
     newSemList.clear();
     for (uint32_t i = 0; i < submitInfo.waitSemaphoreInfoCount; i++) {
-        auto it = std::find(toRemove.begin(), toRemove.end(), submitInfo.pWaitSemaphoreInfos[i].semaphore);
+        auto it = std::find(toRemove.begin(), toRemove.end(),
+                            submitInfo.pWaitSemaphoreInfos[i].semaphore);
         if (it == toRemove.end()) {
             newSemList.push_back(submitInfo.pWaitSemaphoreInfos[i]);
         }
@@ -6297,26 +6377,36 @@ static void pruneWaitSemaphores(const std::vector<VkSemaphore> toRemove,
     submitInfo.pWaitSemaphoreInfos = newSemList.data();
 }
 
-static void pruneSignalSemaphores(const std::vector<VkSemaphore> toRemove,
-    VkSubmitInfo& submitInfo,
-    const VkTimelineSemaphoreSubmitInfo* currTssi,
-    std::vector<VkSemaphore>& newSemList,
-    VkTimelineSemaphoreSubmitInfo& newTssi,
-    std::vector<uint64_t>& newSemValueList)
-{
+static void pruneSignalSemaphores(const std::vector<VkSemaphore>& toRemove,
+                                  VkSubmitInfo& submitInfo,
+                                  const VkTimelineSemaphoreSubmitInfo* currTssi,
+                                  std::vector<VkSemaphore>& newSemList,
+                                  VkTimelineSemaphoreSubmitInfo& newTssi,
+                                  std::vector<uint64_t>& newSemValueList) {
     newSemList.clear();
     newSemValueList.clear();
+
+    if (!submitInfo.pSignalSemaphores) {
+        submitInfo.signalSemaphoreCount = 0;
+        submitInfo.pSignalSemaphores = nullptr;
+        return;
+    }
+
     for (uint32_t i = 0; i < submitInfo.signalSemaphoreCount; i++) {
         auto it = std::find(toRemove.begin(), toRemove.end(), submitInfo.pSignalSemaphores[i]);
         if (it == toRemove.end()) {
             newSemList.push_back(submitInfo.pSignalSemaphores[i]);
-            if (currTssi) {
+
+            if (currTssi && currTssi->pSignalSemaphoreValues &&
+                i < currTssi->signalSemaphoreValueCount) {
                 newSemValueList.push_back(currTssi->pSignalSemaphoreValues[i]);
             }
         }
     }
+
     submitInfo.signalSemaphoreCount = static_cast<uint32_t>(newSemList.size());
-    submitInfo.pSignalSemaphores = newSemList.data();
+    submitInfo.pSignalSemaphores = newSemList.empty() ? nullptr : newSemList.data();
+
     if (newSemValueList.size() > 0) {
         newTssi.signalSemaphoreValueCount = static_cast<uint32_t>(newSemValueList.size());
         newTssi.pSignalSemaphoreValues = newSemValueList.data();
@@ -6324,20 +6414,20 @@ static void pruneSignalSemaphores(const std::vector<VkSemaphore> toRemove,
     }
 }
 
-static void pruneSignalSemaphores(const std::vector<VkSemaphore> toRemove,
-    VkSubmitInfo2& submitInfo,
-    const VkTimelineSemaphoreSubmitInfo* currTssi,
-    std::vector<VkSemaphoreSubmitInfo>& newSemList,
-    VkTimelineSemaphoreSubmitInfo& newTssi,
-    std::vector<uint64_t>& newSemValueList)
-{
+static void pruneSignalSemaphores(const std::vector<VkSemaphore>& toRemove,
+                                  VkSubmitInfo2& submitInfo,
+                                  const VkTimelineSemaphoreSubmitInfo* currTssi,
+                                  std::vector<VkSemaphoreSubmitInfo>& newSemList,
+                                  VkTimelineSemaphoreSubmitInfo& newTssi,
+                                  std::vector<uint64_t>& newSemValueList) {
     // All of this info is contained in VkSubmitInfo2, so goes unused in this implementation
     // of pruneSignalSemaphores
     (void)newTssi;
     (void)newSemValueList;
     newSemList.clear();
     for (uint32_t i = 0; i < submitInfo.signalSemaphoreInfoCount; i++) {
-        auto it = std::find(toRemove.begin(), toRemove.end(), submitInfo.pSignalSemaphoreInfos[i].semaphore);
+        auto it = std::find(toRemove.begin(), toRemove.end(),
+                            submitInfo.pSignalSemaphoreInfos[i].semaphore);
         if (it == toRemove.end()) {
             newSemList.push_back(submitInfo.pSignalSemaphoreInfos[i]);
         }
@@ -6379,6 +6469,11 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
     {
         std::unique_lock<std::recursive_mutex> lock(mLock);
 
+        // VkTimelineSemaphoreSubmitInfo must be ignored if there are no timeline semaphores given
+        // with the submit.
+        // Test: dEQP-VK.synchronization.timeline_semaphore.misc.ignore_timeline_semaphore_info
+        bool hasTimelineSemaphores = false;
+
         for (uint32_t i = 0; i < submitCount; ++i) {
             std::vector<VkSemaphore> waitSemsToRemove;
             std::vector<VkSemaphore> signalSemsToRemove;
@@ -6387,6 +6482,9 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
                 auto it = info_VkSemaphore.find(semaphore);
                 if (it != info_VkSemaphore.end()) {
                     auto& semInfo = it->second;
+                    if (semInfo.isTimeline) {
+                        hasTimelineSemaphores = true;
+                    }
 #ifdef VK_USE_PLATFORM_FUCHSIA
                     if (semInfo.eventHandle) {
                         pre_signal_events.push_back(semInfo.eventHandle);
@@ -6406,6 +6504,9 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
                 auto it = info_VkSemaphore.find(semaphore);
                 if (it != info_VkSemaphore.end()) {
                     auto& semInfo = it->second;
+                    if (semInfo.isTimeline) {
+                        hasTimelineSemaphores = true;
+                    }
 #ifdef VK_USE_PLATFORM_FUCHSIA
                     if (semInfo.eventHandle) {
                         post_wait_events.push_back({semInfo.eventHandle, semInfo.eventKoid});
@@ -6430,7 +6531,10 @@ VkResult ResourceTracker::on_vkQueueSubmitTemplate(void* context, VkResult input
             }
 
             // Get the current TSSI from the unorphaned submitInfo, the prune functions may need this.
-            const VkTimelineSemaphoreSubmitInfo* currTssi = vk_find_struct_const(&pSubmits[i], TIMELINE_SEMAPHORE_SUBMIT_INFO);
+            const VkTimelineSemaphoreSubmitInfo* currTssi =
+                hasTimelineSemaphores
+                    ? vk_find_struct_const(&pSubmits[i], TIMELINE_SEMAPHORE_SUBMIT_INFO)
+                    : nullptr;
             // Start with an orphan copy of the current submitInfo
             prunedSubmitInfos[i] = vk_make_orphan_copy(pSubmits[i]);
             // Do initial setup for the new tssi struct; prune functions may or may not actually add to submitInfo.
@@ -7878,7 +7982,6 @@ const VkPhysicalDeviceMemoryProperties& ResourceTracker::getPhysicalDeviceMemory
 
         VkPhysicalDeviceMemoryProperties properties;
         enc->vkGetPhysicalDeviceMemoryProperties(physicalDevice, &properties, true /* no lock */);
-
         mCachedPhysicalDeviceMemoryProps.emplace(std::move(properties));
     }
     return *mCachedPhysicalDeviceMemoryProps;

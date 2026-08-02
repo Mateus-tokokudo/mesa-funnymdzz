@@ -52,11 +52,6 @@ enum panvk_queue_family {
    PANVK_QUEUE_FAMILY_COUNT,
 };
 
-struct panvk_device_queue_family {
-   struct vk_queue **queues;
-   int queue_count;
-};
-
 struct panvk_device {
    struct vk_device vk;
 
@@ -102,8 +97,6 @@ struct panvk_device {
    uint32_t *dump_region_size;
 
    struct vk_device_dispatch_table cmd_dispatch;
-
-   struct panvk_device_queue_family queue_families[PANVK_QUEUE_FAMILY_COUNT];
 
    struct panvk_precomp_cache *precomp_cache;
 
@@ -185,6 +178,15 @@ panvk_get_flush_id(const struct panvk_device *dev)
    return panthor_kmod_get_flush_id(dev->kmod.dev);
 }
 
+static inline void
+panvk_address_binding_report(struct panvk_device *dev,
+                             struct vk_object_base *object, uint64_t base,
+                             uint64_t size, VkDeviceAddressBindingTypeEXT type)
+{
+   vk_address_binding_report(dev->vk.physical->instance,
+                             object ? object : &dev->vk.base, base, size, type);
+}
+
 static inline uint32_t
 panvk_device_adjust_bo_flags(const struct panvk_device *device,
                              uint32_t bo_flags)
@@ -251,6 +253,27 @@ panvk_as_free(struct panvk_device *device, struct util_vma_heap *heap,
    util_vma_heap_free(heap, address, size);
    simple_mtx_unlock(&device->as.lock);
 }
+
+struct nir_shader;
+
+bool panvk_nir_lower_tile_image(struct nir_shader *nir,
+                                uint32_t *color_read_out, bool *z_read_out,
+                                bool *s_read_out);
+
+struct vk_queue;
+struct vk_queue_submit;
+
+VkResult panvk_create_bind_queue(struct panvk_device *dev,
+                                 const VkDeviceQueueCreateInfo *create_info,
+                                 uint32_t queue_idx,
+                                 struct vk_queue **out_queue);
+void panvk_destroy_bind_queue(struct vk_queue *vk_queue);
+VkResult panvk_bind_queue_submit(struct vk_queue *vk_queue,
+                                 struct vk_queue_submit *vk_submit);
+VkResult panvk_bind_queue_check_status(struct vk_queue *vk_queue);
+VkResult panvk_queue_vm_bind(struct vk_queue *vk_queue,
+                             struct vk_queue_submit *vk_submit,
+                             uint32_t syncobj_handle);
 
 #if PAN_ARCH
 VkResult

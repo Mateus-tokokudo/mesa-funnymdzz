@@ -204,13 +204,19 @@ lvp_physical_device_get_format_properties(struct lvp_physical_device *physical_d
        !ycbcr_info && !util_format_is_int64(desc) &&
        pformat != PIPE_FORMAT_R10G10B10A2_SNORM &&
        pformat != PIPE_FORMAT_B10G10R10A2_SNORM &&
-       pformat != PIPE_FORMAT_B10G10R10A2_UNORM) {
+       pformat != PIPE_FORMAT_B10G10R10A2_UNORM &&
+       pformat != PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM) {
       features |= (VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
                    VK_FORMAT_FEATURE_2_BLIT_DST_BIT);
    }
 
    if (vk_acceleration_struct_vtx_format_supported(format))
       buffer_features |= VK_FORMAT_FEATURE_2_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR;
+
+   /* VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16 (and the pipe format it
+    * maps to) must not advertise blit or buffer features per the Vulkan spec. */
+   if (pformat == PIPE_FORMAT_X6R10X6G10X6B10X6A10_UNORM)
+      buffer_features = 0;
 
    out_properties->linearTilingFeatures = features;
    out_properties->optimalTilingFeatures = features;
@@ -311,11 +317,8 @@ static VkResult lvp_get_image_format_properties(struct lvp_physical_device *phys
                                              &format_props);
    if (info->tiling == VK_IMAGE_TILING_LINEAR) {
       format_feature_flags = format_props.linearTilingFeatures;
-   } else if (info->tiling == VK_IMAGE_TILING_OPTIMAL) {
-      format_feature_flags = format_props.optimalTilingFeatures;
-   } else if (info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
-      if (vk_format_get_plane_count (info->format) > 1)
-        goto unsupported;
+   } else if (info->tiling == VK_IMAGE_TILING_OPTIMAL ||
+              info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
       format_feature_flags = format_props.optimalTilingFeatures;
    } else {
       UNREACHABLE("bad VkImageTiling");

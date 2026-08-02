@@ -1726,8 +1726,10 @@ create_compute_program(struct zink_context *ctx, nir_shader *nir)
 {
    struct zink_screen *screen = zink_screen(ctx->base.screen);
    struct zink_compute_program *comp = create_program(ctx, true);
-   if (!comp)
+   if (!comp) {
+      ralloc_free(nir);
       return NULL;
+   }
    simple_mtx_init(&comp->cache_lock, mtx_plain);
    comp->uses_bindless = nir->info.uses_bindless;
    comp->scratch_size = nir->scratch_size;
@@ -2034,6 +2036,8 @@ bind_gfx_stage(struct zink_context *ctx, mesa_shader_stage stage, struct zink_sh
       }
       ctx->shader_stages &= ~BITFIELD_BIT(stage);
    }
+   /* avoid potential overdraw conflicts */
+   ctx->can_promote_depth_op = false;
 }
 
 static enum mesa_prim
@@ -2929,6 +2933,8 @@ zink_set_primitive_emulation_keys(struct zink_context *ctx)
             ralloc_free(prev_stage);
             struct zink_shader *shader = zink_shader_create(screen, nir);
             zink_shader_init(screen, shader);
+            ralloc_free(shader->nir);
+            shader->nir = NULL;
             shader->needs_inlining = true;
             ctx->gfx_stages[prev_vertex_stage]->non_fs.generated_gs[ctx->gfx_pipeline_state.gfx_prim_mode][zink_prim_type] = shader;
             shader->non_fs.is_generated = true;

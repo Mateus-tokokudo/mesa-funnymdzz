@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "compiler/gen/gen_enums.h"
 #include "util/bitset.h"
 #include "util/lut.h"
 #include "jay_builder.h"
@@ -21,7 +22,7 @@ static bool
 propagate_cmod(jay_function *func, jay_inst *I, jay_inst **defs)
 {
    enum jay_type cmp_type = I->type;
-   enum jay_conditional_mod cmod = I->conditional_mod;
+   gen_condition cmod = I->conditional_mod;
    jay_inst *def = NULL;
 
    /* TODO: Generalize cmod propagation */
@@ -30,11 +31,11 @@ propagate_cmod(jay_function *func, jay_inst *I, jay_inst **defs)
 
    /* Pattern match `cmp ssa, 0` or `cmp 0, ssa`. */
    jay_foreach_ssa_src(I, s) {
-      if (jay_is_zero(I->src[1 - s])) {
+      if (jay_is_zero(I->src[1 - s]) && jay_num_values(I->src[s]) == 1) {
          def = defs[jay_base_index(I->src[s])];
 
          /* Canonicalize the cmod to have the zero second */
-         cmod = s == 1 ? jay_conditional_mod_swap_sources(cmod) : cmod;
+         cmod = s == 1 ? gen_condition_swap_sources(cmod) : cmod;
          break;
       }
    }
@@ -46,9 +47,9 @@ propagate_cmod(jay_function *func, jay_inst *I, jay_inst **defs)
    /* bfn bspec says "only zero(ze), greater-than(gt), and less-than(lt)
     * conditional modifiers are valid."
     */
-   if (def->op == JAY_OPCODE_BFN && !(cmod == JAY_CONDITIONAL_EQ ||
-                                      cmod == JAY_CONDITIONAL_GT ||
-                                      cmod == JAY_CONDITIONAL_LT)) {
+   if (def->op == JAY_OPCODE_BFN && !(cmod == GEN_CONDITION_EQ ||
+                                      cmod == GEN_CONDITION_GT ||
+                                      cmod == GEN_CONDITION_LT)) {
       return false;
    }
 
@@ -62,7 +63,7 @@ propagate_cmod(jay_function *func, jay_inst *I, jay_inst **defs)
 
    enum jay_type instr_type = def->type;
 
-   if (cmod == JAY_CONDITIONAL_NE || cmod == JAY_CONDITIONAL_EQ) {
+   if (cmod == GEN_CONDITION_NE || cmod == GEN_CONDITION_EQ) {
       cmp_type = canonicalize_for_bit_compare(cmp_type);
       instr_type = canonicalize_for_bit_compare(instr_type);
    }
@@ -72,6 +73,7 @@ propagate_cmod(jay_function *func, jay_inst *I, jay_inst **defs)
 
    jay_builder b = jay_init_builder(func, jay_before_inst(I));
    jay_set_conditional_mod(&b, def, I->cond_flag, cmod);
+   def->zero_inactive = I->zero_inactive;
    return true;
 }
 
@@ -121,18 +123,40 @@ propagate_not(jay_inst *I, unsigned s, jay_inst *mod)
    }
 }
 
+/**
+ * Fuse demote(cmp(x, y) != 0) to demote(x CMP y).
+ */
+static void
+fuse_demote(jay_inst *demote, jay_inst **defs)
+{
+   if (!(jay_is_ssa(demote->src[0]) &&
+         jay_is_zero(demote->src[1]) &&
+         demote->type == JAY_TYPE_U1 &&
+         demote->conditional_mod == GEN_CONDITION_NE)) {
+      return;
+   }
+
+   jay_inst *cmp = defs[jay_index(demote->src[0])];
+   if (cmp->op != JAY_OPCODE_CMP || cmp->predication) {
+      return;
+   }
+
+   demote->conditional_mod = cmp->conditional_mod;
+   demote->src[0] = cmp->src[0];
+   demote->src[1] = cmp->src[1];
+   demote->type = cmp->type;
+}
+
 static void
 propagate_forwards(jay_function *f)
 {
    jay_inst **defs = calloc(f->ssa_alloc, sizeof(defs[0]));
-   uint32_t *def_block = malloc(f->ssa_alloc * sizeof(def_block[0]));
 
    jay_foreach_inst_in_func_safe(f, block, I) {
       jay_builder b = jay_init_builder(f, jay_before_inst(I));
 
       jay_foreach_dst_index(I, _, d) {
          defs[d] = I;
-         def_block[d] = block->index;
       }
 
       /* Copy propagate individual components into vectors */
@@ -153,11 +177,13 @@ propagate_forwards(jay_function *f)
       }
 
       /* Don't propagate into phis yet - TODO: File awareness */
-      if (I->op == JAY_OPCODE_PHI_SRC ||
-          I->op == JAY_OPCODE_SEND ||
-          I->op == JAY_OPCODE_BYTE_PACK ||
-          I->op == JAY_OPCODE_WORD_PACK)
+      if (I->op == JAY_OPCODE_PHI_SRC || I->op == JAY_OPCODE_SEND)
          continue;
+
+      /* We fuse demote forwards & upfront to avoid fighting cmod prop */
+      if (I->op == JAY_OPCODE_DEMOTE) {
+         fuse_demote(I, defs);
+      }
 
       jay_foreach_ssa_src(I, s) {
          /* Copy propagate whole vectors */
@@ -173,20 +199,34 @@ propagate_forwards(jay_function *f)
 
          if (def->op == JAY_OPCODE_MOV) {
             /* Default values must have the same file as their dest, do not
-             * propagate invalid there. Also don't propagate inverse-ballots.
+             * propagate invalid there.
              *
-             * For balloted flags, only source 0 can read ARF (i.e. ballotted
-             * flags). Furthermore, we may only propagate ballots locally as the
-             * ballot is implicitly execmask'd which changes throughout the CFG.
+             * Only source 0 can read ARF.
+             *
+             * ISA restrictions forbid 8-bit immediates, don't even try.
              */
             if ((I->src[s].file == def->src[0].file) ||
                 ((!jay_inst_has_default(I) ||
                   &I->src[s] != jay_inst_get_default(I)) &&
                  !(I->src[s].file == UFLAG && !jay_is_imm(def->src[0])) &&
                  !(I->src[s].file == FLAG) &&
-                 (!jay_is_flag(def->src[0]) ||
-                  (s == 0 && def_block[jay_base_index(src)] == block->index)) &&
-                 !(jay_is_imm(def->src[0]) && I->src[s].negate))) {
+                 !(I->predication &&
+                   jay_inst_get_predicate(I) == &I->src[s] &&
+                   !jay_is_flag(def->src[0])) &&
+                 !(I->op == JAY_OPCODE_SEL &&
+                   s == 2 &&
+                   !jay_is_flag(def->src[0])) &&
+                 !(def->src[0].file == J_ARF && s != 0) &&
+                 !(jay_is_imm(def->src[0]) && I->src[s].negate) &&
+                 (jay_num_values(I->src[s]) == jay_num_values(def->src[0]) ||
+                  I->src[s].file != GPR ||
+                  def->src[0].file != UGPR ||
+                  (jay_type_size_bits(jay_src_type(I, s)) ==
+                      jay_type_size_bits(def->type) &&
+                   def->type == I->type &&
+                   !jay_is_shuffle_like(I))) &&
+                 !(jay_is_imm(def->src[0]) &&
+                   jay_type_size_bits(jay_src_type(I, s)) == 8))) {
 
                jay_replace_src(&I->src[s], def->src[0]);
             }
@@ -204,25 +244,19 @@ propagate_forwards(jay_function *f)
       }
 
       if (I->op == JAY_OPCODE_CMP && propagate_cmod(f, I, defs)) {
-         /* Even if we propagate the predicate write, there might be uses of the
-          * register value (TODO: Maybe check for this and skip propagating in
-          * that case?). So we cannot remove the compare, just strip the cond
-          * flag. Furthermore the CMP we always clobber some predicate, so give
-          * it an immediately-dead one instead.
-          */
-         I->cond_flag = jay_alloc_def(&b, I->cond_flag.file, 1);
-         continue;
+         jay_remove_instruction(I);
       }
    }
 
    free(defs);
-   free(def_block);
 }
 
 static bool
 propagate_fsat(jay_inst *I, jay_inst *fsat)
 {
-   if (fsat->op != JAY_OPCODE_MODIFIER ||
+   if (!jay_opcode_infos[I->op].sat ||
+       !jay_type_is_any_float(I->type) ||
+       fsat->op != JAY_OPCODE_MODIFIER ||
        fsat->predication ||
        fsat->src[0].negate ||
        fsat->src[0].abs ||
@@ -241,43 +275,39 @@ propagate_fsat(jay_inst *I, jay_inst *fsat)
 }
 
 /*
- * Locally fuse flag AND/OR by converting to predication with tied sources.
- * While easy in SSA, this relies on RA coalescing everything for profitability.
+ * Fuse flag AND/OR by converting to predication with tied sources.  While easy
+ * in SSA, this relies on RA coalescing everything for profitability.
  *
  *    f0 = cmp a, b            f0 = cmp a, b
  *    f1 = cmp c, d    ---->
  *    f2 = and f0, f1          f2 = (f0|f0) cmp c, d
  */
 static bool
-local_fuse_flag_and_or(jay_function *f,
-                       jay_inst *I,
-                       jay_inst *use,
-                       BITSET_WORD *defined)
+fuse_flag_op(jay_function *f, jay_inst *I, jay_inst *use, BITSET_WORD *defined)
 {
-   /* TODO: Generalize */
    if (I->op != JAY_OPCODE_CMP ||
-       jay_type_size_bits(I->type) == 1 ||
-       jay_type_size_bits(I->type) > 32 ||
        !(use->op == JAY_OPCODE_AND || use->op == JAY_OPCODE_OR) ||
-       use->src[0].negate ||
-       use->src[1].negate) {
+       use->type != JAY_TYPE_U1 ||
+       (use->src[0].negate || use->src[1].negate)) {
       return false;
    }
 
-   assert(jay_is_null(I->dst) && !I->predication);
    unsigned i = jay_defs_equivalent(use->src[0], I->cond_flag) ? 0 : 1;
-   assert(jay_defs_equivalent(use->src[i], I->cond_flag));
    jay_def other = use->src[1 - i];
 
-   /* We must ensure `other` dominates I. Because defs precede uses and we only
-    * work locally, it suffices to check that `other` is defined before I.
-    * Counterintuitively, that means we ensure that `other` has NOT yet been
-    * defined when processing I - because we propagate backwards.
-    *
-    * Currently we also bail on mixed FLAG/UFLAG cases for simplicity.
+   /* XXX: we want to handle things like and.u1 flag 0x1 differently */
+   if (jay_is_imm(other))
+      return false;
+
+   assert(jay_is_null(I->dst) && !I->predication);
+   assert(jay_defs_equivalent(use->src[i], I->cond_flag));
+
+   /* We must ensure `other` dominates I. Because defs dominate uses in SSA, it
+    * suffices to check that `other` is defined before I. Counterintuitively,
+    * that means we ensure that `other` has NOT yet been defined when processing
+    * I - because we propagate backwards.
     */
-   if (BITSET_TEST(defined, jay_index(other)) ||
-       use->src[0].file != use->src[1].file) {
+   if (BITSET_TEST(defined, jay_index(other))) {
       return false;
    }
 
@@ -287,6 +317,7 @@ local_fuse_flag_and_or(jay_function *f,
     *    a | b = a ? 1 : b = a ? a : b
     */
    I->cond_flag = use->dst;
+   I->uniform = jay_is_uniform(use->dst);
    jay_def pred = use->op == JAY_OPCODE_OR ? jay_negate(other) : other;
    jay_builder b = jay_init_builder(f, jay_before_inst(I));
    jay_add_predicate_else(&b, I, pred, other);
@@ -299,7 +330,6 @@ propagate_backwards(jay_function *f)
    jay_inst **uses = calloc(f->ssa_alloc, sizeof(uses[0]));
    BITSET_WORD *multiple = BITSET_CALLOC(f->ssa_alloc);
    BITSET_WORD *defined = BITSET_CALLOC(f->ssa_alloc);
-   uint32_t *def_block = malloc(f->ssa_alloc * sizeof(def_block[0]));
 
    jay_foreach_inst_in_func_safe_rev(f, block, I) {
       jay_foreach_dst_index(I, _, index) {
@@ -321,49 +351,37 @@ propagate_backwards(jay_function *f)
       if (jay_num_values(dst) != 1)
          continue;
 
-      def_block[jay_base_index(dst)] = block->index;
-
       assert(jay_is_ssa(dst));
       jay_inst *use = uses[jay_base_index(dst)];
       if (!use || BITSET_TEST(multiple, jay_base_index(dst)))
          continue;
 
-      if (!jay_is_null(use->dst) &&
-          def_block[jay_base_index(use->dst)] == block->index &&
-          local_fuse_flag_and_or(f, I, use, defined)) {
+      if ((!jay_is_null(use->dst) && fuse_flag_op(f, I, use, defined)) ||
+          (!flag && propagate_fsat(I, use))) {
 
          jay_remove_instruction(use);
          continue;
       }
 
-      if (!flag &&
-          jay_opcode_infos[I->op].sat &&
-          jay_type_is_any_float(I->type) &&
-          propagate_fsat(I, use)) {
-
-         jay_remove_instruction(use);
-         continue;
-      }
-
-      /* Fold UGPR->{GPR, FLAG} and UFLAG->FLAG copies coming out of NIR.
-       * Inverse-ballots are propagated only locally.
-       */
+      /* Fold UGPR->{GPR, FLAG} and UFLAG->FLAG copies coming out of NIR. */
       if (use->type ==
              (flag ? JAY_TYPE_U1 : canonicalize_for_bit_compare(I->type)) &&
           I->op != JAY_OPCODE_PHI_DST &&
+          jay_is_null(I->cond_flag) &&
+          !I->predication &&
           use->op == JAY_OPCODE_MOV &&
           use->dst.file != J_ADDRESS &&
-          (!jay_is_flag(use->dst) ||
-           def_block[jay_base_index(use->dst)] == block->index)) {
+          jay_num_values(use->dst) == jay_num_values(use->src[0]) &&
+          (!jay_is_flag(use->dst) || jay_num_isa_srcs(I) < 3)) {
 
          *(flag ? &I->cond_flag : &I->dst) = use->dst;
+         I->uniform = use->uniform;
          jay_remove_instruction(use);
          continue;
       }
    }
 
    free(defined);
-   free(def_block);
    free(multiple);
    free(uses);
 }

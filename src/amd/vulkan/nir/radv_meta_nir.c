@@ -53,7 +53,7 @@ radv_meta_nir_build_fs_noop()
 }
 
 static void
-radv_meta_nir_build_resolve_shader_core(nir_builder *b, bool use_fmask, int samples, VkImageAspectFlags aspects,
+radv_meta_nir_build_resolve_shader_core(nir_builder *b, bool use_fmask, uint32_t samples, VkImageAspectFlags aspects,
                                         VkResolveModeFlagBits resolve_mode, nir_variable *input_img,
                                         nir_variable *output, nir_def *img_coord)
 {
@@ -71,7 +71,7 @@ radv_meta_nir_build_resolve_shader_core(nir_builder *b, bool use_fmask, int samp
    }
 
    nir_def *accum = sample0;
-   for (int i = 1; i < samples; i++) {
+   for (uint32_t i = 1u; i < samples; i++) {
       nir_def *sample = nir_txf_ms(b, img_coord, nir_imm_int(b, i), .texture_deref = input_img_deref);
 
       switch (resolve_mode) {
@@ -599,9 +599,9 @@ radv_meta_nir_build_btoi_compute_shader(bool is_3d)
 }
 
 nir_shader *
-radv_meta_nir_build_itoi_compute_shader(bool src_3d, bool dst_3d, int samples)
+radv_meta_nir_build_itoi_compute_shader(bool src_3d, bool dst_3d, uint32_t samples)
 {
-   bool is_multisampled = samples > 1;
+   bool is_multisampled = samples > 1u;
    enum glsl_sampler_dim src_dim = src_3d            ? GLSL_SAMPLER_DIM_3D
                                    : is_multisampled ? GLSL_SAMPLER_DIM_MS
                                                      : GLSL_SAMPLER_DIM_2D;
@@ -610,7 +610,7 @@ radv_meta_nir_build_itoi_compute_shader(bool src_3d, bool dst_3d, int samples)
                                                      : GLSL_SAMPLER_DIM_2D;
    const struct glsl_type *buf_type = glsl_sampler_type(src_dim, false, false, GLSL_TYPE_FLOAT);
    const struct glsl_type *img_type = glsl_image_type(dst_dim, false, GLSL_TYPE_FLOAT);
-   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_itoi_cs-%dd-%dd-%d", src_3d ? 3 : 2,
+   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_itoi_cs-%dd-%dd-%u", src_3d ? 3 : 2,
                                              dst_3d ? 3 : 2, samples);
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
@@ -654,15 +654,15 @@ radv_meta_nir_build_itoi_compute_shader(bool src_3d, bool dst_3d, int samples)
 }
 
 nir_shader *
-radv_meta_nir_build_cleari_compute_shader(bool is_3d, int samples)
+radv_meta_nir_build_cleari_compute_shader(bool is_3d, uint32_t samples)
 {
-   bool is_multisampled = samples > 1;
+   bool is_multisampled = samples > 1u;
    enum glsl_sampler_dim dim = is_3d             ? GLSL_SAMPLER_DIM_3D
                                : is_multisampled ? GLSL_SAMPLER_DIM_MS
                                                  : GLSL_SAMPLER_DIM_2D;
    const struct glsl_type *img_type = glsl_image_type(dim, false, GLSL_TYPE_FLOAT);
    nir_builder b =
-      radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, is_3d ? "meta_cleari_cs_3d-%d" : "meta_cleari_cs-%d", samples);
+      radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, is_3d ? "meta_cleari_cs_3d-%d" : "meta_cleari_cs-%u", samples);
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
 
@@ -1043,8 +1043,12 @@ radv_meta_nir_build_expand_depth_stencil_compute_shader(uint8_t samples)
     * creating a vmcnt(0) because it expects the L1 cache to keep memory
     * operations in-order for the same workgroup. The vmcnt(0) seems
     * necessary however. */
+   /* TODO: Because it assumes memory operations within a wave are in-order, ACO only creates a
+    * vmcnt(0) before the stores in multisample shaders because the stores are all part of the same
+    * clause.
+    */
    nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
-               .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_ssbo);
+               .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_image);
 
    for (uint32_t i = 0; i < samples; i++) {
       nir_image_deref_store(&b, &nir_build_deref_var(&b, output_img)->def, global_id, nir_imm_int(&b, i), data[i],
@@ -1085,7 +1089,7 @@ radv_meta_nir_build_dcc_decompress_compute_shader()
     * operations in-order for the same workgroup. The vmcnt(0) seems
     * necessary however. */
    nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_DEVICE,
-               .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_ssbo);
+               .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_image);
 
    nir_image_deref_store(&b, &nir_build_deref_var(&b, output_img)->def, img_coord, nir_undef(&b, 1, 32), data,
                          nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D);
@@ -1093,12 +1097,12 @@ radv_meta_nir_build_dcc_decompress_compute_shader()
 }
 
 nir_shader *
-radv_meta_nir_build_fmask_copy_compute_shader(int samples)
+radv_meta_nir_build_fmask_copy_compute_shader(uint32_t samples)
 {
    const struct glsl_type *sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, false, GLSL_TYPE_FLOAT);
    const struct glsl_type *img_type = glsl_image_type(GLSL_SAMPLER_DIM_MS, false, GLSL_TYPE_FLOAT);
 
-   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_fmask_copy_cs_-%d", samples);
+   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_fmask_copy_cs_-%u", samples);
 
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
@@ -1154,12 +1158,12 @@ radv_meta_nir_build_fmask_copy_compute_shader(int samples)
 }
 
 nir_shader *
-radv_meta_nir_build_fmask_expand_compute_shader(int samples)
+radv_meta_nir_build_fmask_expand_compute_shader(uint32_t samples)
 {
    const struct glsl_type *type = glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, true, GLSL_TYPE_FLOAT);
    const struct glsl_type *img_type = glsl_image_type(GLSL_SAMPLER_DIM_MS, true, GLSL_TYPE_FLOAT);
 
-   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_fmask_expand_cs-%d", samples);
+   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_fmask_expand_cs-%u", samples);
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
 
@@ -1239,7 +1243,7 @@ get_resolve_mode_str(VkResolveModeFlagBits resolve_mode)
 }
 
 nir_shader *
-radv_meta_nir_build_resolve_cs(bool use_fmask, enum radv_meta_resolve_compute_type type, int samples,
+radv_meta_nir_build_resolve_cs(bool use_fmask, enum radv_meta_resolve_compute_type type, uint8_t samples,
                                VkImageAspectFlags aspects, VkResolveModeFlagBits resolve_mode)
 {
    enum glsl_base_type img_base_type =
@@ -1294,7 +1298,7 @@ radv_meta_nir_build_resolve_cs(bool use_fmask, enum radv_meta_resolve_compute_ty
 }
 
 nir_shader *
-radv_meta_nir_build_resolve_fs(bool use_fmask, int samples, bool is_integer, VkImageAspectFlags aspects,
+radv_meta_nir_build_resolve_fs(bool use_fmask, uint32_t samples, bool is_integer, VkImageAspectFlags aspects,
                                VkResolveModeFlagBits resolve_mode)
 {
    enum glsl_base_type img_base_type =
@@ -1348,11 +1352,11 @@ radv_meta_nir_build_resolve_fs(bool use_fmask, int samples, bool is_integer, VkI
 }
 
 nir_shader *
-radv_meta_nir_build_clear_hiz_compute_shader(int samples)
+radv_meta_nir_build_clear_hiz_compute_shader(uint32_t samples)
 {
-   const enum glsl_sampler_dim dim = samples > 1 ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D;
+   const enum glsl_sampler_dim dim = samples > 1u ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D;
    const struct glsl_type *img_type = glsl_image_type(dim, false, GLSL_TYPE_FLOAT);
-   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_clear_hiz_cs-%d", samples);
+   nir_builder b = radv_meta_nir_init_shader(MESA_SHADER_COMPUTE, "meta_clear_hiz_cs-%u", samples);
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
 

@@ -13,7 +13,13 @@ make-git-archive:
     # Compactify the .git directory
     - git gc --aggressive
     # Download & cache the perfetto subproject as well.
-    - rm -rf subprojects/perfetto ; mkdir -p subprojects/perfetto && curl --fail --location https://github.com/google/perfetto/archive/$(grep 'revision =' subprojects/perfetto.wrap | cut -d ' ' -f3).tar.gz | tar zxf - --strip-components=1 -C subprojects/perfetto
+    - |
+      perfetto_sdk_dir=$(grep -E '^directory = ' subprojects/perfetto-sdk.wrap | cut -d ' ' -f3)
+      rm -rf subprojects/"$perfetto_sdk_dir"
+      mkdir -p subprojects/"$perfetto_sdk_dir"
+      curl --fail --location $(grep -E '^source_url = ' subprojects/perfetto-sdk.wrap | cut -d ' ' -f3) --output perfetto-sdk.zip
+      unzip perfetto-sdk.zip -d subprojects/"$perfetto_sdk_dir"
+      rm perfetto-sdk.zip
     # compress the current folder
     - tar -cvzf ../$CI_PROJECT_NAME.tar.gz .
 
@@ -137,6 +143,7 @@ debian-x86_64-msan:
       -D precomp-compiler=enabled
       -D install-precomp-compiler=true
       -D tools=panfrost
+      -D panfrost-rust=true
 
 debian-x86_64-ubsan:
   extends:
@@ -170,6 +177,7 @@ debian-build-x86_64:
   extends:
     - .meson-build-for-tests
     - .use-debian/x86_64_build
+    - .build-run-long  # but it really shouldn't! tracked in mesa#12544
   variables:
     UNWIND: "enabled"
     C_ARGS: >
@@ -193,6 +201,7 @@ debian-build-x86_64:
     EXTRA_OPTION: >
       -D spirv-to-dxil=true
       -D tools=drm-shim,etnaviv,freedreno,glsl,intel,intel-ui,nir,nouveau,lima,panfrost,asahi
+      -D panfrost-rust=true
       -D perfetto=true
     S3_ARTIFACT_NAME: debian-build-x86_64
 
@@ -224,6 +233,7 @@ debian-release:
       -D spirv-to-dxil=true
       -D tools=all
       -D mesa-clc=enabled
+      -D panfrost-rust=true
       -D precomp-compiler=enabled
       -D intel-rt=enabled
       -D imagination-srv=true
@@ -289,7 +299,7 @@ fedora-release:
       -D glvnd=enabled
       -D platforms=x11,wayland
     EXTRA_OPTION: >
-      -D tools=drm-shim,etnaviv,freedreno,glsl,intel,nir,nouveau,lima,panfrost,imagination
+      -D tools=drm-shim,etnaviv,freedreno,glsl,intel,nir,nouveau,lima,panfrost,imagination,gamma
       -D vulkan-layers=device-select,overlay
       -D intel-rt=enabled
       -D imagination-srv=true
@@ -473,6 +483,7 @@ debian-arm64:
       -D teflon=true
       -D perfetto=true
       -D vulkan-layers=screenshot
+      -D panfrost-rust=true
     GALLIUM_ST:
       -D gallium-rusticl=true
       -D legacy-wayland=bind-wayland-display
@@ -494,6 +505,7 @@ debian-arm64-asan:
       -D valgrind=disabled
       -D tools=dlclose-skip
       -D gallium-rusticl=false
+      -D panfrost-rust=true
     ARTIFACTS_DEBUG_SYMBOLS: 1
     RUN_MESON_TESTS: "false"  # just too slow
     S3_ARTIFACT_NAME: mesa-arm64-asan-${BUILDTYPE}
@@ -528,6 +540,7 @@ debian-arm64-build-test:
       -D glvnd=disabled
     EXTRA_OPTION: >
       -D tools=panfrost,imagination
+      -D panfrost-rust=true
       -D perfetto=true
 
 debian-arm64-release:
@@ -598,6 +611,7 @@ debian-clang:
       -D spirv-to-dxil=true
       -D imagination-srv=true
       -D tools=drm-shim,etnaviv,freedreno,glsl,intel,intel-ui,nir,nouveau,lima,panfrost,asahi,imagination
+      -D panfrost-rust=true
       -D vulkan-layers=device-select,overlay
       -D build-radv-tests=true
       -D build-aco-tests=true
@@ -685,6 +699,7 @@ debian-vulkan:
       -D build-aco-tests=true
       -D intel-rt=disabled
       -D imagination-srv=true
+      -D panfrost-rust=true
 
 debian-x86_32:
   extends:
@@ -718,6 +733,7 @@ debian-x86_32:
       -D platforms=
       -D mesa-clc=enabled
       -D install-mesa-clc=true
+      -D panfrost-rust=true
 
 # In case of issues with this job, contact @frankbinns
 .debian-riscv64:

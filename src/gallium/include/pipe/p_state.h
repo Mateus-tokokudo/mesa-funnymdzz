@@ -509,6 +509,7 @@ struct pipe_sampler_view
          unsigned last_layer:16;   /**< last layer to use for array textures */
          unsigned first_level:8;   /**< first mipmap level to use */
          unsigned last_level:8;    /**< last mipmap level to use */
+         float min_lod_clamp;      /**< absolute mip-level LOD lower bound, 0 = none (VK_EXT_image_view_min_lod) */
       } tex;
       struct {
          unsigned offset;   /**< offset in bytes */
@@ -1142,6 +1143,12 @@ struct pipe_ml_operation
           * Whether this is a depthwise convolution.
           */
          bool depthwise;
+
+         /**
+          * Quantized activation clamp range for fused activations.
+          */
+         int activation_min;
+         int activation_max;
 
          /**
           * Whether this convolution has fused ReLU activation.

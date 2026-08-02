@@ -30,6 +30,8 @@ uint64_t nak_debug_flags(const struct nak_compiler *nak);
 const struct nir_shader_compiler_options *
 nak_nir_options(const struct nak_compiler *nak);
 
+uint32_t nak_max_warps_per_sm(uint32_t num_gprs, const struct nak_compiler *nak);
+
 void nak_preprocess_nir(nir_shader *nir, const struct nak_compiler *nak);
 
 bool nak_nir_lower_image_addrs(nir_shader *nir, const struct nak_compiler *nak);
@@ -107,9 +109,11 @@ const extern struct nak_constant_offset_info nak_const_offsets_turing_graphics;
 #define NAK_CAN_PRINTF true
 #endif
 
+void nak_lower_nir_before_linking(nir_shader *nir, const struct nak_compiler *nak);
 void nak_postprocess_nir(nir_shader *nir, const struct nak_compiler *nak,
                          nir_variable_mode robust2_modes,
-                         const struct nak_fs_key *fs_key);
+                         const struct nak_fs_key *fs_key,
+                         bool has_task_shader);
 
 enum ENUM_PACKED nak_ts_domain {
    NAK_TS_DOMAIN_ISOLINE = 0,
@@ -121,6 +125,12 @@ enum ENUM_PACKED nak_ts_spacing {
    NAK_TS_SPACING_INTEGER = 0,
    NAK_TS_SPACING_FRACT_ODD = 1,
    NAK_TS_SPACING_FRACT_EVEN = 2,
+};
+
+enum PACKED nak_mesh_topology {
+   NAK_MESH_TOPOLOGY_POINTS = 0,
+   NAK_MESH_TOPOLOGY_LINES = 1,
+   NAK_MESH_TOPOLOGY_TRIANGLES = 4,
 };
 
 struct nak_xfb_info {
@@ -190,7 +200,7 @@ struct nak_shader_info {
          /* Shared memory size */
          uint16_t smem_size;
 
-         uint8_t _pad[4];
+         uint8_t _pad[132];
       } cs;
 
       struct {
@@ -200,7 +210,7 @@ struct nak_shader_info {
          bool uses_sample_shading;
          bool early_fragment_tests;
 
-         uint8_t _pad[7];
+         uint8_t _pad[135];
       } fs;
 
       struct {
@@ -209,11 +219,33 @@ struct nak_shader_info {
          bool ccw;
          bool point_mode;
 
-         uint8_t _pad[8];
+         uint8_t _pad[136];
       } ts;
 
+      struct {
+         uint32_t gs_hdr[32];
+         uint16_t max_primitives;
+         uint16_t max_vertices;
+         uint16_t local_size;
+         uint16_t smem_size;
+         enum nak_mesh_topology topology;
+
+         /** Shader header for GS stage when per primitive outputs are used */
+         bool has_gs_sph;
+         bool has_task_shader;
+
+         uint8_t _pad[1];
+      } mesh;
+
+      struct {
+         uint16_t local_size;
+         uint16_t payload_smem_size;
+         uint16_t smem_size;
+         uint8_t _pad[130];
+      } task;
+
       /* Used to initialize the union for other stages */
-      uint8_t _pad[12];
+      uint8_t _pad[140];
    };
 
    struct {
@@ -250,7 +282,8 @@ struct nak_shader_bin *
 nak_compile_shader(nir_shader *nir, bool dump_asm,
                    const struct nak_compiler *nak,
                    nir_variable_mode robust2_modes,
-                   const struct nak_fs_key *fs_key);
+                   const struct nak_fs_key *fs_key,
+                   bool has_task_shader);
 
 struct nak_qmd_cbuf {
    uint32_t index;
@@ -266,6 +299,8 @@ struct nak_qmd_info {
    uint32_t global_size[3];
 
    uint32_t num_cbufs;
+   uint16_t dependence_counter;
+   uint16_t hw_dependence_counter;
    struct nak_qmd_cbuf cbufs[8];
 };
 
@@ -279,6 +314,15 @@ void nak_fill_qmd(const struct nv_device_info *dev,
                   const struct nak_shader_info *info,
                   const struct nak_qmd_info *qmd_info,
                   void *qmd_out, size_t qmd_size);
+void nak_set_dependent_qmd(const struct nv_device_info *dev, void *qmd,
+                           size_t qmd_size, uint64_t dependent_qmd_addr,
+                           bool schedule);
+void nak_set_invalidate_cache(const struct nv_device_info *dev, void *qmd,
+                              size_t qmd_size,
+                              bool texture_header, bool texture_samplers,
+                              bool texture_data,
+                              bool instruction_cache,
+                              bool shader_data, bool shader_constants);
 
 struct nak_qmd_dispatch_size_layout {
    uint16_t x_start, x_end;

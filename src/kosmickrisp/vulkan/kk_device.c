@@ -14,7 +14,11 @@
 #include "kk_shader.h"
 
 #include "kosmickrisp/bridge/mtl_bridge.h"
+#include "kosmickrisp/bridge/mtl_device.h"
+#include "kosmickrisp/bridge/ns_process_info.h"
+#include "kosmickrisp/compiler/nir_to_msl.h"
 
+#include "kk_dispatch_cmd.h"
 #include "vk_cmd_enqueue_entrypoints.h"
 #include "vk_common_entrypoints.h"
 
@@ -22,6 +26,89 @@
 #include "vk_pipeline_cache.h"
 
 #include <time.h>
+
+struct kk_mtl_compiler {
+   mtl_compiler *handle;
+   uint32_t refcount;
+};
+
+static struct hash_table compilers_ht;
+static simple_mtx_t compilers_ht_lock;
+static once_flag compilers_ht_once = ONCE_FLAG_INIT;
+
+static void
+kk_init_compiler_table()
+{
+   _mesa_pointer_hash_table_init(&compilers_ht, NULL);
+   simple_mtx_init(&compilers_ht_lock, mtx_plain);
+}
+
+static mtl_compiler *
+kk_acquire_compiler(struct kk_device *dev)
+{
+   /* KK_WORKAROUND_11 */
+   if (dev->disabled_workarounds & BITFIELD64_BIT(11)) {
+      return mtl_new_compiler(dev->mtl_handle);
+   }
+
+   call_once(&compilers_ht_once, kk_init_compiler_table);
+   simple_mtx_lock(&compilers_ht_lock);
+
+   struct hash_entry *ent =
+      _mesa_hash_table_search(&compilers_ht, dev->mtl_handle);
+
+   struct kk_mtl_compiler *compiler;
+   if (ent == NULL) {
+      compiler = ralloc(NULL, struct kk_mtl_compiler);
+      if (compiler == NULL) {
+         simple_mtx_unlock(&compilers_ht_lock);
+         return NULL;
+      }
+
+      compiler->handle = mtl_new_compiler(dev->mtl_handle);
+      if (compiler->handle == NULL) {
+         ralloc_free(compiler);
+         simple_mtx_unlock(&compilers_ht_lock);
+         return NULL;
+      }
+
+      compiler->refcount = 1;
+      _mesa_hash_table_insert(&compilers_ht, dev->mtl_handle, compiler);
+   } else {
+      compiler = ent->data;
+      compiler->refcount++;
+   }
+
+   simple_mtx_unlock(&compilers_ht_lock);
+   return compiler->handle;
+}
+
+static void
+kk_release_compiler(struct kk_device *dev)
+{
+   /* KK_WORKAROUND_11 */
+   if (dev->disabled_workarounds & BITFIELD64_BIT(11)) {
+      mtl_release(dev->mtl_compiler_handle);
+      return;
+   }
+
+   simple_mtx_lock(&compilers_ht_lock);
+
+   struct hash_entry *ent =
+      _mesa_hash_table_search(&compilers_ht, dev->mtl_handle);
+   if (ent != NULL) {
+      struct kk_mtl_compiler *compiler = ent->data;
+      --compiler->refcount;
+
+      if (compiler->refcount == 0) {
+         _mesa_hash_table_remove(&compilers_ht, ent);
+         mtl_release(compiler->handle);
+         ralloc_free(compiler);
+      }
+   }
+
+   simple_mtx_unlock(&compilers_ht_lock);
+}
 
 DERIVE_HASH_TABLE(mtl_sampler_packed);
 
@@ -32,7 +119,10 @@ kk_init_sampler_heap(struct kk_device *dev, struct kk_sampler_heap *h)
    if (!h->ht)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   VkResult result = kk_query_table_init(dev, &h->table, 1024);
+   /* We optimistically size the table to fit the maximum number of samplers we
+    * advertise. If this exceeds the hardware sampler limit, it is handled by
+    * additional checks in `kk_sampler_heap_add_locked` */
+   VkResult result = kk_query_table_init(dev, &h->table, MSL_MAX_SAMPLERS);
 
    if (result != VK_SUCCESS) {
       ralloc_free(h->ht);
@@ -62,6 +152,8 @@ kk_sampler_heap_add_locked(struct kk_device *dev, struct kk_sampler_heap *h,
                            struct mtl_sampler_packed desc,
                            struct kk_rc_sampler **out)
 {
+   struct kk_physical_device *pdev = kk_device_physical(dev);
+
    struct hash_entry *ent = _mesa_hash_table_search(h->ht, &desc);
    if (ent != NULL) {
       *out = ent->data;
@@ -71,6 +163,10 @@ kk_sampler_heap_add_locked(struct kk_device *dev, struct kk_sampler_heap *h,
 
       return VK_SUCCESS;
    }
+
+   /* Constrain to device max sampler count */
+   if (h->ht->entries >= pdev->info.max_sampler_count)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    struct kk_rc_sampler *rc = ralloc(h->ht, struct kk_rc_sampler);
    if (!rc)
@@ -161,6 +257,16 @@ kk_parse_device_environment_options(struct kk_device *dev)
       int index = atoi(list);
       dev->disabled_workarounds |= BITFIELD64_BIT(index);
    }
+
+   /* Workarounds resolved on macOS 27 */
+   if (ns_is_os_version_at_least(27, 0, 0)) {
+      dev->disabled_workarounds |= BITFIELD64_MASK(7);
+      dev->disabled_workarounds |= BITFIELD64_BIT(12);
+   }
+   /* M5-only workarounds */
+   if (kk_device_physical(dev)->info.gpu_apple_family < 10) {
+      dev->disabled_workarounds |= BITFIELD64_BIT(16);
+   }
 }
 
 static VkResult
@@ -168,7 +274,11 @@ kk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
 {
    struct kk_device *dev = container_of(device, struct kk_device, vk);
 
-   *timestamp = mtl_device_get_gpu_timestamp(dev->mtl_handle);
+   uint64_t gpu_ns = mtl_device_get_gpu_timestamp(dev->mtl_handle);
+   uint64_t frequency = mtl_device_timestamp_frequency(dev->mtl_handle);
+
+   *timestamp =
+      (uint64_t)(((unsigned __int128)gpu_ns * frequency) / 1000000000ull);
    return VK_SUCCESS;
 }
 
@@ -187,8 +297,7 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
       return vk_error(pdev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    /* Fill the dispatch table we will expose to the users */
-   vk_device_dispatch_table_from_entrypoints(
-      &dev->exposed_dispatch_table, &vk_cmd_enqueue_device_entrypoints, true);
+   dev->exposed_dispatch_table = kk_device_cmd_trampolines;
    vk_device_dispatch_table_from_entrypoints(&dev->exposed_dispatch_table,
                                              &kk_device_entrypoints, false);
    vk_device_dispatch_table_from_entrypoints(&dev->exposed_dispatch_table,
@@ -215,11 +324,18 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->vk.command_dispatch_table = &dev->vk.dispatch_table;
    dev->vk.get_timestamp = kk_get_timestamp;
 
+   kk_parse_device_environment_options(dev);
+
+   /* Create a new Metal pipeline compiler for the device */
+   dev->mtl_compiler_handle = kk_acquire_compiler(dev);
+   if (dev->mtl_compiler_handle == NULL)
+      goto fail_init;
+
    /* We need to initialize the device residency set before any bo is created. */
    simple_mtx_init(&dev->residency_set.mutex, mtx_plain);
    dev->residency_set.handle = mtl_new_residency_set(dev->mtl_handle);
    if (dev->residency_set.handle == NULL)
-      goto fail_init;
+      goto fail_compiler;
 
    if (pCreateInfo->queueCreateInfoCount > 0) {
       result =
@@ -246,8 +362,6 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_sampler_heap;
 
-   kk_parse_device_environment_options(dev);
-
    *pDevice = kk_device_to_handle(dev);
 
    return VK_SUCCESS;
@@ -266,6 +380,8 @@ fail_mem_cache:
 fail_vab_memory:
    mtl_release(dev->residency_set.handle);
    simple_mtx_destroy(&dev->residency_set.mutex);
+fail_compiler:
+   kk_release_compiler(dev);
 fail_init:
    vk_device_finish(&dev->vk);
 fail_alloc:
@@ -306,6 +422,8 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    mtl_release(dev->residency_set.handle);
    simple_mtx_destroy(&dev->residency_set.mutex);
 
+   kk_release_compiler(dev);
+
    vk_device_finish(&dev->vk);
 
    vk_free(&dev->vk.alloc, dev);
@@ -345,6 +463,23 @@ kk_device_remove_heap_from_residency_set(struct kk_device *dev, mtl_heap *heap)
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_remove_allocation(dev->residency_set.handle, heap);
+   simple_mtx_unlock(&dev->residency_set.mutex);
+}
+
+void
+kk_device_add_buffer_to_residency_set(struct kk_device *dev, mtl_buffer *buffer)
+{
+   simple_mtx_lock(&dev->residency_set.mutex);
+   mtl_residency_set_add_allocation(dev->residency_set.handle, buffer);
+   simple_mtx_unlock(&dev->residency_set.mutex);
+}
+
+void
+kk_device_remove_buffer_from_residency_set(struct kk_device *dev,
+                                           mtl_buffer *buffer)
+{
+   simple_mtx_lock(&dev->residency_set.mutex);
+   mtl_residency_set_remove_allocation(dev->residency_set.handle, buffer);
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 

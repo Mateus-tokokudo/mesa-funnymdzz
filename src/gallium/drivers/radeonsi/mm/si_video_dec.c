@@ -54,7 +54,7 @@ static void si_dec_decode_bitstream(struct pipe_video_codec *decoder, struct pip
       }
 
       if (!vid->bs_size) {
-         buf = si_resource(pipe_buffer_create(vid->screen, 0, PIPE_USAGE_STAGING, total_bs_size));
+         buf = si_vid_create_buffer(vid->screen, PIPE_USAGE_STAGING, 0, total_bs_size);
          if (!buf) {
             ERROR("Can't create bitstream buffer!");
             return;
@@ -130,7 +130,7 @@ static void si_dec_fill_surface(struct si_video_dec *vid, struct pipe_resource *
 
    for (uint32_t i = 0; i < surf->num_planes; i++) {
       assert(tex);
-      surf->planes[i].va = si_dec_buf_address(vid, &tex->buffer, RADEON_USAGE_READWRITE, RADEON_DOMAIN_VRAM);
+      surf->planes[i].va = si_dec_buf_address(vid, &tex->buffer, usage, RADEON_DOMAIN_VRAM);
       if (sscreen->info.gfx_level >= GFX9) {
          surf->planes[i].va += tex->surface.u.gfx9.surf_offset;
       } else {
@@ -153,7 +153,7 @@ static struct si_resource *si_dec_get_emb_buffer(struct si_video_dec *vid)
    struct si_resource *emb_buffer = vid->emb_buffers[vid->cur_buffer];
 
    if (vid->dec->embedded_size && !emb_buffer) {
-      emb_buffer = si_resource(pipe_buffer_create(vid->screen, 0, PIPE_USAGE_DEFAULT, vid->dec->embedded_size));
+      emb_buffer = si_vid_create_buffer(vid->screen, PIPE_USAGE_DEFAULT, 0, vid->dec->embedded_size);
       vid->emb_buffers[vid->cur_buffer] = emb_buffer;
    }
 
@@ -186,8 +186,8 @@ static int si_dec_init_decoder(struct si_video_dec *vid, struct ac_video_dec_ses
    }
 
    if (vid->dec->session_size) {
-      vid->session_buffer = si_resource(pipe_buffer_create(vid->screen, 0, PIPE_USAGE_DEFAULT,
-                                                           vid->dec->session_size));
+      unsigned flags = vid->dec->init_session_buf ? 0 : PIPE_RESOURCE_FLAG_UNMAPPABLE;
+      vid->session_buffer = si_vid_create_buffer(vid->screen, PIPE_USAGE_DEFAULT, flags, vid->dec->session_size);
       if (!vid->session_buffer) {
          ret = -ENOMEM;
          goto err;
@@ -195,8 +195,9 @@ static int si_dec_init_decoder(struct si_video_dec *vid, struct ac_video_dec_ses
    }
 
    if (protected && vid->dec->session_tmz_size) {
-      vid->session_tmz_buffer = si_resource(pipe_buffer_create(vid->screen, PIPE_BIND_PROTECTED,
-                                                               PIPE_USAGE_DEFAULT, vid->dec->session_tmz_size));
+      vid->session_tmz_buffer = si_vid_create_buffer(vid->screen, PIPE_USAGE_DEFAULT,
+                                                     PIPE_RESOURCE_FLAG_UNMAPPABLE | PIPE_RESOURCE_FLAG_ENCRYPTED,
+                                                     vid->dec->session_tmz_size);
       if (!vid->session_tmz_buffer) {
          ret = -ENOMEM;
          goto err;
@@ -204,7 +205,8 @@ static int si_dec_init_decoder(struct si_video_dec *vid, struct ac_video_dec_ses
    }
 
    if (vid->dec->init_session_buf) {
-      struct si_resource *session_buf = protected ? vid->session_tmz_buffer : vid->session_buffer;
+      struct si_resource *session_buf = (protected && vid->dec->session_tmz_size) ?
+                                        vid->session_tmz_buffer : vid->session_buffer;
       void *ptr = vid->ws->buffer_map(vid->ws, session_buf->buf, NULL,
                                       PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
       if (!ptr) {
@@ -304,6 +306,22 @@ static int si_dec_destroy_decoder(struct si_video_dec *vid)
    return ret;
 }
 
+static enum pipe_format dpb_format(struct si_video_dec *vid)
+{
+   assert(vid->dec->param.sub_sample == AC_VIDEO_SUBSAMPLE_420);
+
+   switch (vid->dec->param.max_bit_depth) {
+   case 8:
+      return PIPE_FORMAT_NV12;
+   case 10:
+      return PIPE_FORMAT_P010;
+   case 12:
+      return PIPE_FORMAT_P012;
+   default:
+      UNREACHABLE("invalid bit depth");
+   }
+}
+
 static enum ac_video_dec_tier select_tier(struct si_video_dec *vid, struct pipe_video_buffer *target)
 {
    struct si_screen *sscreen = (struct si_screen *)vid->screen;
@@ -384,8 +402,10 @@ static int decode_cmd_build(struct si_video_dec *vid, struct pipe_picture_desc *
 
    if (cmd->tier == AC_VIDEO_DEC_TIER0 && vid->dpb_size) {
       if (!vid->dpb_buffer) {
-         unsigned bind = pic->protected_playback ? PIPE_BIND_PROTECTED : 0;
-         vid->dpb_buffer = si_resource(pipe_buffer_create(vid->screen, bind, PIPE_USAGE_DEFAULT, vid->dpb_size));
+         unsigned flags = PIPE_RESOURCE_FLAG_UNMAPPABLE;
+         if (pic->protected_playback)
+            flags |= PIPE_RESOURCE_FLAG_ENCRYPTED;
+         vid->dpb_buffer = si_vid_create_buffer(vid->screen, PIPE_USAGE_DEFAULT, flags, vid->dpb_size);
          if (!vid->dpb_buffer)
             return -ENOMEM;
       }
@@ -405,7 +425,7 @@ static int decode_cmd_build(struct si_video_dec *vid, struct pipe_picture_desc *
          if (pic->protected_playback)
             bind |= PIPE_BIND_PROTECTED;
          vid->dpb_buffer = si_resource(vid->screen->resource_create(vid->screen, &(struct pipe_resource){
-            .format = cmd->decode_surface.format,
+            .format = dpb_format(vid),
             .target = PIPE_TEXTURE_2D_ARRAY,
             .width0 = align(vid->base.width, vid->dpb_alignment),
             .height0 = align(vid->base.height, vid->dpb_alignment),
@@ -457,7 +477,7 @@ static int decode_cmd_build(struct si_video_dec *vid, struct pipe_picture_desc *
             if (pic->protected_playback)
                bind |= PIPE_BIND_PROTECTED;
             ref = vid->screen->resource_create(vid->screen, &(struct pipe_resource){
-               .format = cmd->decode_surface.format,
+               .format = dpb_format(vid),
                .target = PIPE_TEXTURE_2D,
                .width0 = width,
                .height0 = height,
@@ -590,8 +610,10 @@ static int si_dec_h264(struct si_video_dec *vid, struct pipe_video_buffer *targe
                if (pic->bottom_is_reference[j])
                   h264->used_for_reference_flags |= (1 << (2 * j + 1));
                h264->curr_pic_ref_frame_num++;
-               si_dec_fill_surface(vid, ((struct vl_video_buffer *)pic->ref[j])->resources[0],
-                                   RADEON_USAGE_READWRITE, &cmd.ref_surfaces[cmd.num_refs]);
+               if (cmd.tier == AC_VIDEO_DEC_TIER3) {
+                  si_dec_fill_surface(vid, ((struct vl_video_buffer *)pic->ref[j])->resources[0],
+                                      RADEON_USAGE_READWRITE, &cmd.ref_surfaces[cmd.num_refs]);
+               }
                cmd.ref_id[cmd.num_refs++] = i;
                found = true;
             }
@@ -617,6 +639,14 @@ static int si_dec_h264(struct si_video_dec *vid, struct pipe_video_buffer *targe
    for (unsigned i = 0; i < ARRAY_SIZE(pic->ref) && pic->ref[i]; i++) {
       if (pic->is_non_existing[i] || (pic->ref[i] && h264->ref_frame_id_list[i] == 0xff))
          h264->non_existing_frame_flags |= 1 << i;
+   }
+
+   /* Need at least one reference for P/B frames */
+   if (h264->curr_pic_ref_frame_num == 0) {
+      for (uint32_t i = 0; i < pic->slice_count; i++) {
+         if (pic->slice_parameter.slice_type[i] % 5 != 2)
+            return 1;
+      }
    }
 
    cmd.cur_id = h264->curr_pic_id;
@@ -747,8 +777,10 @@ static int si_dec_h265(struct si_video_dec *vid, struct pipe_video_buffer *targe
             if (vid->render_pic_list[i] == pic->ref[j]) {
                h265->ref_poc_list[j] = pic->PicOrderCntVal[j];
                h265->ref_pic_id_list[j] = i;
-               si_dec_fill_surface(vid, ((struct vl_video_buffer *)pic->ref[j])->resources[0],
-                                   RADEON_USAGE_READWRITE, &cmd.ref_surfaces[cmd.num_refs]);
+               if (cmd.tier == AC_VIDEO_DEC_TIER3) {
+                  si_dec_fill_surface(vid, ((struct vl_video_buffer *)pic->ref[j])->resources[0],
+                                      RADEON_USAGE_READWRITE, &cmd.ref_surfaces[cmd.num_refs]);
+               }
                cmd.ref_id[cmd.num_refs++] = i;
                valid_ref = j;
                found = true;
@@ -923,8 +955,10 @@ static int si_dec_vp9(struct si_video_dec *vid, struct pipe_video_buffer *target
          for (unsigned j = 0; j < VP9_NUM_REF_FRAMES; j++) {
             if (vid->render_pic_list[i] == pic->ref[j]) {
                vp9->ref_frame_id_list[j] = i;
-               si_dec_fill_surface(vid, ((struct vl_video_buffer *)pic->ref[j])->resources[0],
-                                   RADEON_USAGE_READWRITE, &cmd.ref_surfaces[cmd.num_refs]);
+               if (cmd.tier == AC_VIDEO_DEC_TIER3) {
+                  si_dec_fill_surface(vid, ((struct vl_video_buffer *)pic->ref[j])->resources[0],
+                                      RADEON_USAGE_READWRITE, &cmd.ref_surfaces[cmd.num_refs]);
+               }
                cmd.ref_id[cmd.num_refs++] = i;
                valid_ref = j;
                found = true;
@@ -1139,8 +1173,10 @@ static int si_dec_av1(struct si_video_dec *vid, struct pipe_video_buffer *target
          for (unsigned j = 0; j < AV1_NUM_REF_FRAMES; j++) {
             if (vid->render_pic_list[i] == pic->ref[j]) {
                av1->ref_frame_id_list[j] = i;
-               si_dec_fill_surface(vid, ((struct vl_video_buffer *)pic->ref[j])->resources[0],
-                                   RADEON_USAGE_READWRITE, &cmd.ref_surfaces[cmd.num_refs]);
+               if (cmd.tier == AC_VIDEO_DEC_TIER3) {
+                  si_dec_fill_surface(vid, ((struct vl_video_buffer *)pic->ref[j])->resources[0],
+                                      RADEON_USAGE_READWRITE, &cmd.ref_surfaces[cmd.num_refs]);
+               }
                cmd.ref_id[cmd.num_refs++] = i;
                valid_ref = j;
                found = true;

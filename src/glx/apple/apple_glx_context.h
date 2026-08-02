@@ -61,6 +61,9 @@ struct apple_glx_context
    bool is_current;             /* True if the context is current in some thread. */
    bool made_current;           /* True if the context has ever been made current. */
 
+   /* Requested GLX_CONTEXT_PROFILE_MASK_ARB, for glXQueryContext introspection. */
+   int profile_mask;
+
    /*
     * last_surface is set by the pending_destroy code handler for a drawable.
     * Due to a CG difference, we have to recreate a surface if the window
@@ -72,6 +75,8 @@ struct apple_glx_context
 
 bool apple_glx_create_context(void **ptr, Display * dpy, int screen,
                               const void *mode, void *sharedContext,
+                              int major_version, int minor_version,
+                              int profile_mask, int flags,
                               int *errorptr, bool * x11errorptr);
 void apple_glx_destroy_context(void **ptr, Display * dpy);
 
@@ -89,5 +94,17 @@ int apple_glx_context_surface_changed(unsigned int uid, pthread_t caller);
 void apple_glx_context_update(Display * dpy, void *ptr);
 
 bool apple_glx_context_uses_stereo(void *ptr);
+
+/* CGL truncates kCGLCPSwapInterval to 8 bits: 256 reads back as 0 and
+ * disables vsync, and -1 reads back as 255.  This is the largest
+ * interval it actually honors.
+ */
+#define APPLE_GLX_MAX_SWAP_INTERVAL 255
+
+bool apple_glx_context_set_swap_interval(void *ptr, int interval);
+bool apple_glx_context_get_swap_interval(void *ptr, int *interval);
+
+/* Defined in apple_glx_swap_interval.c. */
+struct glx_context *apple_glx_get_current_context(void);
 
 #endif /*APPLE_GLX_CONTEXT_H */

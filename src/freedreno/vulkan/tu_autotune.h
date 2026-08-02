@@ -242,13 +242,11 @@ struct tu_autotune {
    std::mutex rp_latency_mutex; /* Protects rp_latency_tracking */
    uint64_t last_latency_cleanup_ts = 0;
 
-   uint32_t preemption_latency_selector_reg;
-   uint32_t preemption_latency_selector;
-   uint32_t preemption_latency_counter_reg_lo;
+   const struct fd_perfcntr_counter *preemption_latency_counter;
+   const struct fd_perfcntr_countable *preemption_latency_countable;
 
-   uint32_t always_count_selector_reg;
-   uint32_t always_count_selector;
-   uint32_t always_count_counter_reg_lo;
+   const struct fd_perfcntr_counter *always_count_counter;
+   const struct fd_perfcntr_countable *always_count_countable;
 
    struct tu_draw_state reset_rp_hash_draw_state;
 
@@ -326,10 +324,16 @@ struct tu_autotune {
     */
    void disable_preempt_optimize();
 
-   void
-   begin_renderpass(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx, bool sysmem, uint32_t tile_count);
+   /* Allocates the BO for this render pass. Must be called before any GPU
+    * emission (begin_renderpass, begin_binning).
+    */
+   void init_renderpass(rp_ctx_t rp_ctx, bool sysmem, uint32_t tile_count);
 
+   void begin_renderpass(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx);
    void end_renderpass(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx);
+
+   void begin_binning(struct tu_cs *cs, rp_ctx_t rp_ctx);
+   void end_binning(struct tu_cs *cs, rp_ctx_t rp_ctx);
 
    void begin_tile(struct tu_cmd_buffer *cmd, struct tu_cs *cs, rp_ctx_t rp_ctx, uint32_t tile_idx);
 

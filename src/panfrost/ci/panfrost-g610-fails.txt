@@ -15,7 +15,6 @@ afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 
 afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2d_projvec4,Fail
 afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2dshadow,Fail
 afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 3d,Fail
-afbcp-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
 afbcp-spec@glsl-1.30@execution@tex-miplevel-selection texturegrad 1darray,Fail
 afbcp-spec@glsl-1.30@execution@tex-miplevel-selection texturegrad 1darrayshadow,Fail
 afbcp-spec@glsl-1.30@execution@tex-miplevel-selection texturegrad 1d,Fail
@@ -89,15 +88,6 @@ spec@egl 1.4@eglterminate then unbind context,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
 spec@egl_mesa_configless_context@basic,Fail
-spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
-spec@ext_framebuffer_multisample@accuracy 16 srgb depthstencil,Fail
-spec@ext_framebuffer_multisample@accuracy 16 srgb depthstencil linear,Fail
-spec@ext_framebuffer_multisample@accuracy 16 srgb small depthstencil,Fail
-spec@ext_framebuffer_multisample@accuracy 16 srgb small depthstencil linear,Fail
-spec@ext_framebuffer_multisample@accuracy all_samples srgb depthstencil,Fail
-spec@ext_framebuffer_multisample@accuracy all_samples srgb depthstencil linear,Fail
-spec@ext_framebuffer_multisample@accuracy all_samples srgb small depthstencil,Fail
-spec@ext_framebuffer_multisample@accuracy all_samples srgb small depthstencil linear,Fail
 spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 16,Fail
 spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 6,Fail
 spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 8,Fail
@@ -110,7 +100,6 @@ spec@ext_framebuffer_multisample@draw-buffers-alpha-to-coverage 8,Fail
 spec@ext_framebuffer_multisample@sample-alpha-to-coverage 16 color,Fail
 spec@ext_framebuffer_multisample@sample-alpha-to-coverage 6 color,Fail
 spec@ext_framebuffer_multisample@sample-alpha-to-coverage 8 color,Fail
-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
 spec@ext_shader_framebuffer_fetch@execution@gles3@discard-ms8,Fail
 spec@ext_shader_framebuffer_fetch_non_coherent@execution@gles3@discard-ms8,Fail
 spec@ext_transform_feedback2@draw-auto,Fail
@@ -298,5 +287,37 @@ spec@!opengl 1.1@large-tex,Fail
 spec@arb_texture_view@tex-view,Fail
 spec@glsl-1.30@execution@glsl-packed-back-color,Fail
 
-# VKCTS 1.4.4.2 -> 1.4.5.3 uprev
-dEQP-VK.wsi.xlib.present_timing.query.parallel.parallel,Fail
+# OpenCL (rusticl) failures
+api@clgetextensionfunctionaddressforplatform,Fail
+api@cllinkprogram,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float1,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float16,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float2,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float4,Fail
+program@execute@builtin@builtin-float-nextafter-1.0.generated@nextafter float8,Fail
+program@execute@global-offset,Fail
+program@execute@global-offset@3d- input dependent,Fail
+program@execute@vector-conversion,Fail
+
+# OpenCL-CTS quick profile
+Compiler@unload_repeated,Fail
+Compiler@unload_compile_unload_link,Fail
+Compiler@unload_build_unload_create_kernel,Fail
+Compiler@unload_build_threaded,Fail
+Compiler,Fail
+Images (clFillImage max size)@1D,Fail
+# Caused by the outdated SPIR-V LLVM Translator in the test image
+Basic@work_item_functions_out_of_range,Fail
+Basic,Crash
+Images (clCopyImage max size),Fail
+Images (clCopyImage max size)@2D,Fail
+Images (clCopyImage max size)@2Darrayto2D,Fail
+Images (clCopyImage max size)@2Darrayto3D,Fail
+Images (clCopyImage max size)@2Dto2Darray,Fail
+Images (clCopyImage max size)@2Dto3D,Fail
+Images (clCopyImage max size)@3Dto2D,Fail
+Images (clCopyImage max size)@3Dto2Darray,Fail
+Math@ilogb,Fail
+Math,Crash
+Relationals,Crash

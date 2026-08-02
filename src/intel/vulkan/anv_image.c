@@ -638,12 +638,18 @@ add_aux_state_tracking_buffer(struct anv_device *device,
     * The indirect clear color BO requires 64B-alignment on gfx11+. If we're
     * using a modifier with clear color, then some kernels might require a 4k
     * alignment.
+    *
+    * If it's an aliased image, we can't use private bindings either since
+    * aliased images with the same parameters should be consistent (e.g., they
+    * can't have separate clear colors).
     */
    enum anv_image_memory_binding binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
    uint32_t clear_color_alignment = 64;
    if (mod_info && mod_info->supports_clear_color) {
       binding = ANV_IMAGE_MEMORY_BINDING_PLANE_0 + plane;
       clear_color_alignment = 4096;
+   } else if (image->vk.create_flags & VK_IMAGE_CREATE_ALIAS_BIT) {
+      binding = ANV_IMAGE_MEMORY_BINDING_PLANE_0 + plane;
    }
 
    return image_binding_grow(device, image, binding,
@@ -740,17 +746,24 @@ add_aux_surface_if_supported(struct anv_device *device,
 
       ok = isl_surf_get_hiz_surf(&device->isl_dev, main_surf,
                                  &image->planes[plane].aux_surface.isl);
-      if (!ok) {
+
+      if (!ok && !isl_surf_supports_ccs(&device->isl_dev, main_surf)) {
          anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
                        "Skipping aux surface creation: "
-                       "isl_surf_get_hiz_surf failed");
+                       "isl_surf_get_hiz_surf failed and CCS unsupported");
          return VK_SUCCESS;
-      }
-
-      if (!isl_surf_supports_ccs(&device->isl_dev, main_surf)) {
+      } else if (!ok) {
+         assert(device->info->verx10 >= 125);
          anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
-                       "Depth surface does not support CCS, "
-                       "falling back to HIZ without compression");
+                       "Depth surface does not support HiZ, "
+                       "falling back to compression without HiZ");
+         image->planes[plane].aux_usage = ISL_AUX_USAGE_ZCS;
+      } else if (!isl_surf_supports_ccs(&device->isl_dev, main_surf)) {
+         if (device->info->ver >= 12) {
+            anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
+                          "Depth surface does not support CCS, "
+                          "falling back to HIZ without compression");
+         }
          image->planes[plane].aux_usage = ISL_AUX_USAGE_HIZ;
       } else if (want_hiz_wt_for_image(device->info, image)) {
          assert(device->info->ver >= 12);
@@ -760,10 +773,13 @@ add_aux_surface_if_supported(struct anv_device *device,
          image->planes[plane].aux_usage = ISL_AUX_USAGE_HIZ_CCS;
       }
 
-      result = add_surface(device, image, &image->planes[plane].aux_surface,
-                           binding, ANV_OFFSET_IMPLICIT);
-      if (result != VK_SUCCESS)
-         return result;
+      if (ok) {
+         result = add_surface(device, image,
+                              &image->planes[plane].aux_surface, binding,
+                              ANV_OFFSET_IMPLICIT);
+         if (result != VK_SUCCESS)
+            return result;
+      }
 
       if (anv_image_plane_uses_aux_map(device, image, plane)) {
          result = add_compression_control_buffer(device, image, plane,
@@ -782,9 +798,11 @@ add_aux_surface_if_supported(struct anv_device *device,
       }
    } else if (main_surf->usage & (ISL_SURF_USAGE_STENCIL_BIT | ISL_SURF_USAGE_CPB_BIT)) {
       if (!isl_surf_supports_ccs(&device->isl_dev, main_surf)) {
-         anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
-                       "Skipping aux surface creation: "
-                       "stencil/cpb surface does not support CCS");
+         if (device->info->ver >= 12) {
+            anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
+                          "Skipping aux surface creation: "
+                          "stencil/cpb surface does not support CCS");
+         }
          return VK_SUCCESS;
       }
 
@@ -815,19 +833,7 @@ add_aux_surface_if_supported(struct anv_device *device,
       }
 
       /* Choose aux usage. */
-      if (device->info->verx10 == 125 && !device->physical->disable_fcv) {
-         /* FCV is enabled via 3DSTATE_3D_MODE. We'd expect plain CCS_E to
-          * perform better because it allows for non-zero fast clear colors,
-          * but we've run into regressions in several benchmarks (F1 22 and
-          * RDR2) when trying to enable it. When non-zero clear colors are
-          * enabled, we've observed many partial resolves. We haven't yet
-          * root-caused what layout transitions are causing these resolves,
-          * so in the meantime, we choose to reduce our clear color support.
-          * With only zero clear colors being supported, we might as well
-          * turn on FCV.
-          */
-         image->planes[plane].aux_usage = ISL_AUX_USAGE_FCV_CCS_E;
-      } else if (intel_needs_workaround(device->info, 1607794140)) {
+      if (intel_needs_workaround(device->info, 1607794140)) {
          /* FCV is permanently enabled on this hardware. */
          assert(device->info->verx10 == 120);
          image->planes[plane].aux_usage = ISL_AUX_USAGE_FCV_CCS_E;
@@ -878,9 +884,11 @@ add_aux_surface_if_supported(struct anv_device *device,
       if (isl_surf_supports_ccs(&device->isl_dev, main_surf)) {
          image->planes[plane].aux_usage = ISL_AUX_USAGE_MCS_CCS;
       } else {
-         anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
-                       "MSAA color surface does not support CCS, "
-                       "falling back to MCS without compression");
+         if (device->info->ver >= 12) {
+            anv_perf_warn(VK_LOG_OBJS(&device->vk.base),
+                          "MSAA color surface does not support CCS, "
+                          "falling back to MCS without compression");
+         }
          image->planes[plane].aux_usage = ISL_AUX_USAGE_MCS;
       }
 
@@ -1155,11 +1163,14 @@ check_memory_bindings(const struct anv_device *device,
             isl_drm_modifier_get_info(image->vk.drm_format_mod);
 
          /* If the image is created with a drm modifier that supports clear
-          * color, it will be exported along with main surface. Otherwise,
-          * place the aux-tracking state in a separate, suballocated buffer
-          * to achieve better memory utilization.
+          * color it will be exported along with main surface. If the image is
+          * aliased, it cannot be private since it must be consistent among
+          * all aliases. Otherwise, place the aux-tracking state in a
+          * separate, suballocated buffer to achieve better memory
+          * utilization.
           */
-         if (!mod_info || !mod_info->supports_clear_color)
+         if (!(mod_info && mod_info->supports_clear_color) &&
+             !(image->vk.create_flags & VK_IMAGE_CREATE_ALIAS_BIT))
             binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
 
          /* The indirect clear color BO requires 64B-alignment on gfx11+. */
@@ -3274,6 +3285,7 @@ anv_bind_image_memory(struct anv_device *device,
       } else {
          assert(image->planes[p].aux_usage == ISL_AUX_USAGE_CCS_E ||
                 image->planes[p].aux_usage == ISL_AUX_USAGE_FCV_CCS_E ||
+                image->planes[p].aux_usage == ISL_AUX_USAGE_ZCS ||
                 image->planes[p].aux_usage == ISL_AUX_USAGE_STC_CCS);
          image->planes[p].aux_usage = ISL_AUX_USAGE_NONE;
       }
@@ -3472,13 +3484,15 @@ anv_get_image_subresource_layout(struct anv_device *device,
    if (comp_props && device->physical->expose_compression_control) {
       comp_props->imageCompressionFixedRateFlags =
          VK_IMAGE_COMPRESSION_FIXED_RATE_NONE_EXT;
-      comp_props->imageCompressionFlags = VK_IMAGE_COMPRESSION_DISABLED_EXT;
-      for (uint32_t p = 0; p < image->n_planes; p++) {
-         if (image->planes[p].aux_usage != ISL_AUX_USAGE_NONE) {
-            comp_props->imageCompressionFlags = VK_IMAGE_COMPRESSION_DEFAULT_EXT;
-            break;
-         }
-      }
+      /* Even if decided to disable compression without
+       * VK_IMAGE_COMPRESSION_DISABLED_EXT, it's an internal decision and we
+       * assume this is the default. So for the query we only return what was
+       * specified by the application.
+       */
+      comp_props->imageCompressionFlags =
+         (image->vk.compr_flags & VK_IMAGE_COMPRESSION_DISABLED_EXT) ?
+         VK_IMAGE_COMPRESSION_DISABLED_EXT :
+         VK_IMAGE_COMPRESSION_DEFAULT_EXT;
    }
 }
 
@@ -3729,6 +3743,7 @@ anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
 
       case ISL_AUX_USAGE_CCS_E:
       case ISL_AUX_USAGE_FCV_CCS_E:
+      case ISL_AUX_USAGE_ZCS:
       case ISL_AUX_USAGE_STC_CCS:
          break;
 
@@ -3776,6 +3791,7 @@ anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
          return ISL_AUX_STATE_COMPRESSED_NO_CLEAR;
       }
 
+   case ISL_AUX_USAGE_ZCS:
    case ISL_AUX_USAGE_STC_CCS:
       assert(aux_supported);
       assert(!clear_supported);
@@ -4072,7 +4088,7 @@ anv_can_fast_clear_color(const struct anv_cmd_buffer *cmd_buffer,
       if (image->planes[plane].aux_usage != ISL_AUX_USAGE_NONE) {
          anv_perf_warn(VK_LOG_OBJS(&image->vk.base),
                        "%s does not support fast clear on %dx%d %s "
-                       "isl_tiling_%s image with usage 0x%x. Slow clearing.",
+                       "isl_tiling_%s image with usage 0x%"PRIx64". Slow clearing.",
                        vk_ImageLayout_to_str(layout),
                        image->vk.extent.width, image->vk.extent.height,
                        vk_format_description(image->vk.format)->short_name,
@@ -4237,7 +4253,7 @@ anv_can_hiz_clear_image(struct anv_cmd_buffer *cmd_buffer,
                   "HiZ CCS WT + MSAA unsupported before Xe2. "
                   "Slow depth clearing.");
       return false;
-      }
+   }
 
    /* If we're just clearing stencil, we can always HiZ clear */
    if (!(clear_aspects & VK_IMAGE_ASPECT_DEPTH_BIT))
@@ -4254,7 +4270,7 @@ anv_can_hiz_clear_image(struct anv_cmd_buffer *cmd_buffer,
       return false;
    }
 
-   if (isl_aux_usage_has_ccs(clear_aux_usage)) {
+   if (device->info->ver == 12 && isl_aux_usage_has_ccs(clear_aux_usage)) {
       /* From the TGL PRM, Vol 9, "Compressed Depth Buffers" (under the
        * "Texture performant" and "ZCS" columns):
        *
@@ -4263,14 +4279,32 @@ anv_can_hiz_clear_image(struct anv_cmd_buffer *cmd_buffer,
        *
        * Although alignment requirements are only listed for the texture
        * performant mode, test results indicate that requirements exist for
-       * the non-texture performant mode as well. Disable partial clears.
+       * the non-texture performant mode as well. Require 8x4 alignment for
+       * partial clears.
+       *
+       * According to Bspec page 56461 (r74422), the alignment restriction is
+       * gone on gfx20+.
+       *
+       * XXX: Does the framework allow us to view UNDEFINED layouts which will
+       * be cleared? If so, we could make use of this to partial clear texture
+       * if the rectangle overlaps with all HiZ blocks. HSD 22011236099 also
+       * states that Xe2+ is able to initialize the HiZ blocks touched by a
+       * partial clear as needed. See can_use_attachment_initial_layout().
+       *
+       * TODO: We could set the
+       * 3DSTATE_WM_HZ_OP::FullSurfaceDepthandStencilClear flag for
+       * depth-only clears which are aligned to the HIZ block size.
        */
-      if (render_area.offset.x > 0 ||
-          render_area.offset.y > 0 ||
-          render_area.extent.width !=
-          u_minify(image->vk.extent.width, level) ||
-          render_area.extent.height !=
-          u_minify(image->vk.extent.height, level)) {
+      const uint32_t level_w = u_minify(image->vk.extent.width, level);
+      const uint32_t level_h = u_minify(image->vk.extent.height, level);
+      if ((render_area.offset.x > 0 ||
+           render_area.offset.y > 0 ||
+           render_area.extent.width < level_w ||
+           render_area.extent.height < level_h) &&
+          (!util_is_aligned(render_area.offset.x, 8) ||
+           !util_is_aligned(render_area.offset.y, 4) ||
+           !util_is_aligned(render_area.extent.width, 8) ||
+           !util_is_aligned(render_area.extent.height, 4))) {
           anv_perf_warn(VK_LOG_OBJS(&image->vk.base),
                         "partial depth clear rect unsupported for "
                         "fast clear. Slow clearing.");
