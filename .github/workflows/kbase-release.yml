@@ -147,10 +147,11 @@ jobs:
             vulkan-icd-loader \
             zlib \
             zstd
-          # Arch Linux ARM does not currently ship a bindgen CLI package.
-          # Pin the version Mesa accepts and expose Cargo's bin directory to
-          # subsequent workflow steps.
-          cargo install --locked --version 0.71.1 bindgen-cli
+          # Pin bindgen for Arch's rapidly moving Rust/Clang toolchain and
+          # expose Cargo's bin directory to subsequent workflow steps.
+          # 0.71.1 mis-generates one-byte C structures here; Mesa rejects
+          # 0.72.0, while 0.72.1 contains the relevant fixes.
+          cargo install --locked --version 0.72.1 bindgen-cli
           echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
 
       - name: Configure minimal release build
