@@ -165,6 +165,10 @@ apply unchanged to every device.
 
 ## Troubleshooting
 
+- For a queue-hang investigation, set `PANVK_DEBUG=kbase_diag` to add GPU
+  progress breadcrumbs and command-stream dumps. This instrumentation is off
+  by default because its extra memory stores and scoreboard waits reduce
+  draw/dispatch throughput.
 - If no GPU is found, check access permissions for `/dev/mali0` inside the
   container.
 - If raw WSI cannot allocate an image, check `/dev/dma_heap/system` access or

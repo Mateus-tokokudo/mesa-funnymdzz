@@ -46,6 +46,13 @@ panvk_per_arch(kbase_mark_progress)(
    struct panvk_cmd_buffer *cmdbuf, enum panvk_subqueue_id subqueue,
    enum panvk_kbase_progress_marker marker)
 {
+   /* These stores are breadcrumbs for queue-hang diagnosis, not part of the
+    * queue ABI.  Keeping them in every draw/dispatch stream adds several LS
+    * instructions and a store flush at each marker, which is particularly
+    * costly for draw-heavy applications.  Keep the instrumentation opt-in. */
+   if (!PANVK_DEBUG(KBASE_DIAG))
+      return;
+
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(dev->vk.physical);

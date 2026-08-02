@@ -562,16 +562,20 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
       cs_heap_set(&b, addr64);
    }
 
-   /* Diagnostic breadcrumbs in the seqno cell. If completion times out, these
-    * tell us whether the ring entry started, whether the called stream
-    * returned, and whether the final all-scoreboard wait completed. */
-   cs_move64_to(&b, addr64, seqno_addr);
-   cs_move64_to(&b, val64, KBASE_SEQNO_MARK_PRE_CALL | target_seqno);
-   cs_store64(&b, val64, addr64, KBASE_SEQNO_MARK_PRE_CALL_OFFSET);
-   cs_wait_slot(&b, SB_ID(LS));
-   cs_move32_to(&b, val32, 0);
-   cs_store32(&b, val32, addr64, KBASE_SEQNO_STREAM_PROGRESS_OFFSET);
-   cs_wait_slot(&b, SB_ID(LS));
+   /* Diagnostic breadcrumbs are useful when investigating a hang, but each
+    * one introduces an LS transaction and a scoreboard stall in the hot
+    * submission path.  Normal operation only needs the completion writes
+    * below, so make the extra instrumentation opt-in with
+    * PANVK_DEBUG=kbase_diag. */
+   if (PANVK_DEBUG(KBASE_DIAG)) {
+      cs_move64_to(&b, addr64, seqno_addr);
+      cs_move64_to(&b, val64, KBASE_SEQNO_MARK_PRE_CALL | target_seqno);
+      cs_store64(&b, val64, addr64, KBASE_SEQNO_MARK_PRE_CALL_OFFSET);
+      cs_wait_slot(&b, SB_ID(LS));
+      cs_move32_to(&b, val32, 0);
+      cs_store32(&b, val32, addr64, KBASE_SEQNO_STREAM_PROGRESS_OFFSET);
+      cs_wait_slot(&b, SB_ID(LS));
+   }
 
    if (stream_size) {
       /* Make CPU-written command-stream/descriptor memory visible to the
@@ -589,10 +593,12 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
       cs_call(&b, addr64, val32);
    }
 
-   cs_move64_to(&b, addr64, seqno_addr);
-   cs_move64_to(&b, val64, KBASE_SEQNO_MARK_POST_CALL | target_seqno);
-   cs_store64(&b, val64, addr64, KBASE_SEQNO_MARK_POST_CALL_OFFSET);
-   cs_wait_slot(&b, SB_ID(LS));
+   if (PANVK_DEBUG(KBASE_DIAG)) {
+      cs_move64_to(&b, addr64, seqno_addr);
+      cs_move64_to(&b, val64, KBASE_SEQNO_MARK_POST_CALL | target_seqno);
+      cs_store64(&b, val64, addr64, KBASE_SEQNO_MARK_POST_CALL_OFFSET);
+      cs_wait_slot(&b, SB_ID(LS));
+   }
 
    /* Signal completion once all prior operations retired: an explicit
     * WAIT on all scoreboard slots, then a plain LS store of the absolute
@@ -607,9 +613,11 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
     * while the deferred op is in flight. */
    cs_move64_to(&b, addr64, seqno_addr);
    cs_wait_slots(&b, dev->csf.sb.all_mask);
-   cs_move64_to(&b, val64, KBASE_SEQNO_MARK_POST_WAIT | target_seqno);
-   cs_store64(&b, val64, addr64, KBASE_SEQNO_MARK_POST_WAIT_OFFSET);
-   cs_wait_slot(&b, SB_ID(LS));
+   if (PANVK_DEBUG(KBASE_DIAG)) {
+      cs_move64_to(&b, val64, KBASE_SEQNO_MARK_POST_WAIT | target_seqno);
+      cs_store64(&b, val64, addr64, KBASE_SEQNO_MARK_POST_WAIT_OFFSET);
+      cs_wait_slot(&b, SB_ID(LS));
+   }
    cs_move64_to(&b, val64, target_seqno);
    cs_store64(&b, val64, addr64, KBASE_SEQNO_LS_COPY_OFFSET);
    cs_wait_slot(&b, SB_ID(LS));
@@ -1538,7 +1546,7 @@ init_subqueue(struct panvk_gpu_queue *queue, enum panvk_subqueue_id subqueue)
       };
 
 #ifdef HAVE_PAN_KMOD_KBASE
-      if (gpu_queue_uses_kbase(dev)) {
+      if (gpu_queue_uses_kbase(dev) && PANVK_DEBUG(KBASE_DIAG)) {
          cs_ctx->debug.kbase_progress_addr =
             kbase_subqueue_seqno_dev_addr(queue, subqueue) +
             KBASE_SEQNO_STREAM_PROGRESS_OFFSET;
@@ -2427,7 +2435,7 @@ panvk_queue_submit_init_cmdbufs(struct panvk_queue_submit *submit,
             continue;
 
 #ifdef HAVE_PAN_KMOD_KBASE
-         if (gpu_queue_uses_kbase(dev)) {
+         if (gpu_queue_uses_kbase(dev) && PANVK_DEBUG(KBASE_DIAG)) {
             kbase_log_stream_prefix(j, cs_root_chunk_gpu_addr(b),
                                     cs_root_chunk_size(b),
                                     b->root_chunk.buffer.cpu);

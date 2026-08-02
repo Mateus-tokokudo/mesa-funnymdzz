@@ -56,6 +56,7 @@ static const struct debug_control panvk_debug_options[] = {
    {"coherent_before_cached", PANVK_DEBUG_COHERENT_BEFORE_CACHED},
    {"no_extended_va_range", PANVK_DEBUG_NO_EXTENDED_VA_RANGE},
    {"hsr_prepass", PANVK_DEBUG_HSR_PREPASS},
+   {"kbase_diag", PANVK_DEBUG_KBASE_DIAG},
    {NULL, 0},
 };
 
