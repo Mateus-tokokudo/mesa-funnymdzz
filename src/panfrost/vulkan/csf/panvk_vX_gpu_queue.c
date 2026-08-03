@@ -681,10 +681,10 @@ kbase_subqueue_publish(struct panvk_gpu_queue *queue, uint32_t subqueue)
    struct panvk_subqueue *subq = &queue->subqueues[subqueue];
    uint8_t *input_page = (uint8_t *)subq->kbase.user_io + 4096;
 
-   /* Drain the ring writes all the way to GPU-visible memory before the
-    * insert offset moves — an inner-shareable barrier is not enough (see
-    * kbase_gpu_wmb). */
-   kbase_gpu_wmb();
+   /* kbase_subqueue_emit_job() has already cleaned the CPU-written ring
+    * cachelines and completed that clean with kbase_gpu_wmb().  Do not issue
+    * a second full-system barrier here: it cannot make those writes any more
+    * visible and only serializes the CPU submission path. */
 
    *(volatile uint64_t *)(input_page + CS_USER_IO_INPUT_CS_INSERT) =
       subq->kbase.insert;
