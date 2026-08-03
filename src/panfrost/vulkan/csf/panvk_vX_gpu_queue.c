@@ -600,27 +600,29 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
       cs_wait_slot(&b, SB_ID(LS));
    }
 
-   /* Signal completion once all prior operations retired: an explicit
-    * WAIT on all scoreboard slots, then a plain LS store of the absolute
-    * seqno (offset 16 in the cell), then a SYNC_ADD64 on the cell proper
-    * with an empty wait mask — the latter matching the sequence the
-    * panthor kernel emits (a deferred op's wait mask must not include its
-    * own signal slot, so waiting through the defer isn't an option).
-    * The LS store both provides a second CPU-visible completion path and
-    * lets the wait loop tell "ran but sync write lost" apart from
-    * "never ran".  Nothing is emitted after the SYNC_ADD64 (except the
-    * register-less ERROR_BARRIER) so its operands can't be clobbered
-    * while the deferred op is in flight. */
+   /* Signal completion once all prior operations retired: an explicit WAIT
+    * on all scoreboard slots followed by a SYNC_ADD64 on the cell proper
+    * with an empty wait mask, matching the panthor kernel and proprietary
+    * timeline path.  A deferred op's wait mask must not include its own
+    * signal slot, so waiting through the defer is not an option.
+    *
+    * Keep the secondary LS completion copy as diagnostic instrumentation.
+    * It adds an LS transaction and a scoreboard stall to every submitted
+    * job, while normal completion and CQS notification already use the
+    * system-scope SYNC_ADD64 below.  Nothing is emitted after that sync
+    * operation (except the register-less ERROR_BARRIER), so its operands
+    * cannot be clobbered while the deferred operation is in flight. */
    cs_move64_to(&b, addr64, seqno_addr);
    cs_wait_slots(&b, dev->csf.sb.all_mask);
    if (PANVK_DEBUG(KBASE_DIAG)) {
       cs_move64_to(&b, val64, KBASE_SEQNO_MARK_POST_WAIT | target_seqno);
       cs_store64(&b, val64, addr64, KBASE_SEQNO_MARK_POST_WAIT_OFFSET);
       cs_wait_slot(&b, SB_ID(LS));
+
+      cs_move64_to(&b, val64, target_seqno);
+      cs_store64(&b, val64, addr64, KBASE_SEQNO_LS_COPY_OFFSET);
+      cs_wait_slot(&b, SB_ID(LS));
    }
-   cs_move64_to(&b, val64, target_seqno);
-   cs_store64(&b, val64, addr64, KBASE_SEQNO_LS_COPY_OFFSET);
-   cs_wait_slot(&b, SB_ID(LS));
    cs_move64_to(&b, val64, 1);
    cs_sync64_add(&b, true, MALI_CS_SYNC_SCOPE_SYSTEM, val64, addr64,
                  cs_defer(0, SB_ID(DEFERRED_SYNC)));
@@ -750,7 +752,8 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                                                CS_USER_IO_OUTPUT_CS_ACTIVE);
 
       kbase_cache_invalidate_range((const void *)cell, kbase_seqno_stride());
-      if (cell->seqno >= target_seqno || *ls_copy >= target_seqno ||
+      if (cell->seqno >= target_seqno ||
+          (PANVK_DEBUG(KBASE_DIAG) && *ls_copy >= target_seqno) ||
           (allow_ring_drain && extract >= target_insert && !active))
          break;
 
@@ -865,14 +868,15 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
          kbase_kmod_csf_wait_event(dev->kmod.dev, remaining);
    }
 
+   bool completed =
+      cell->seqno >= target_seqno ||
+      (PANVK_DEBUG(KBASE_DIAG) && *ls_copy >= target_seqno);
+
    mesa_logd("kbase: completed subqueue %u job %" PRIu64
              ": seqno %" PRIu64 ", ls_copy %" PRIu64
              ", stream progress 0x%x%s",
              subqueue, target_seqno, (uint64_t)cell->seqno, *ls_copy,
-             *stream_progress,
-             cell->seqno >= target_seqno || *ls_copy >= target_seqno
-                ? ""
-                : " (ring-drain init fallback)");
+             *stream_progress, completed ? "" : " (ring-drain init fallback)");
 
    return VK_SUCCESS;
 }
