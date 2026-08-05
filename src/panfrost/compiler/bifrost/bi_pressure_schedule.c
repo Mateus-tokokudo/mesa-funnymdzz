@@ -14,6 +14,9 @@ struct sched_ctx {
 
    /* Live set */
    BITSET_WORD *live;
+
+   /* Whether a latency tie-break changed the otherwise pressure-only order. */
+   bool latency_tiebreak_used;
 };
 
 struct sched_node {
@@ -201,6 +204,31 @@ calculate_pressure_delta(bi_instr *I, BITSET_WORD *live)
    return delta;
 }
 
+/* Input messages have enough latency that placing independent ALU between the
+ * message and its consumer is generally preferable.  This scheduler works
+ * bottom-up, so de-prioritizing an input message among equal-pressure ready
+ * instructions moves it earlier in the final forward instruction stream.
+ *
+ * Keep stores, atomics, barriers and framebuffer messages out of this class:
+ * they don't produce a value whose latency can be hidden, and moving them
+ * earlier only lengthens side-effect lifetimes.
+ */
+static bool
+is_latency_hiding_message(const bi_instr *I)
+{
+   switch (bi_get_opcode_props(I)->message) {
+   case BIFROST_MESSAGE_VARYING:
+   case BIFROST_MESSAGE_ATTRIBUTE:
+   case BIFROST_MESSAGE_TEX:
+   case BIFROST_MESSAGE_VARTEX:
+   case BIFROST_MESSAGE_LOAD:
+   case BIFROST_MESSAGE_64BIT:
+      return true;
+   default:
+      return false;
+   }
+}
+
 /*
  * Choose the next instruction, bottom-up. For now we use a simple greedy
  * heuristic: choose the instruction that has the best effect on liveness.
@@ -214,7 +242,13 @@ choose_instr(struct sched_ctx *s)
    list_for_each_entry(struct sched_node, n, &s->dag->heads, dag.link) {
       int32_t delta = calculate_pressure_delta(n->instr, s->live);
 
-      if (delta < min_delta) {
+      if (delta < min_delta ||
+          (delta == min_delta && best &&
+           is_latency_hiding_message(best->instr) &&
+           !is_latency_hiding_message(n->instr))) {
+         if (delta == min_delta && best)
+            s->latency_tiebreak_used = true;
+
          best = n;
          min_delta = delta;
       }
@@ -226,6 +260,8 @@ choose_instr(struct sched_ctx *s)
 static void
 pressure_schedule_block(bi_context *ctx, bi_block *block, struct sched_ctx *s)
 {
+   s->latency_tiebreak_used = false;
+
    /* off by a constant, that's ok */
    signed pressure = 0;
    signed orig_max_pressure = 0;
@@ -259,8 +295,13 @@ pressure_schedule_block(bi_context *ctx, bi_block *block, struct sched_ctx *s)
       bi_liveness_ins_update_ssa(s->live, node->instr);
    }
 
-   /* Bail if it looks like it's worse */
-   if (max_pressure >= orig_max_pressure) {
+   /* Keep an equal-pressure Valhall schedule only when the latency tie-break
+    * actually moved an input message earlier.  Bifrost still has a later
+    * clause scheduler, so preserve its pressure-only policy here.
+    */
+   if (max_pressure > orig_max_pressure ||
+       (max_pressure == orig_max_pressure &&
+        (ctx->arch < 9 || !s->latency_tiebreak_used))) {
       free(schedule);
       return;
    }
