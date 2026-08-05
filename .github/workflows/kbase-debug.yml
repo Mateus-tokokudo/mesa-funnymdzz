@@ -72,7 +72,7 @@ jobs:
             -Dlibdir=lib \
             -Dbuild-tests=false \
             -Degl=enabled \
-            -Degl-native-platform=wayland \
+            -Degl-native-platform=auto \
             -Denable-glcpp-tests=false \
             -Dgallium-drivers=panfrost \
             -Dgbm=enabled \
