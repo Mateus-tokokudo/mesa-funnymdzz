@@ -8,6 +8,8 @@
 #include "poly/geometry.h"
 #include "poly/cl/tessellator.h"
 
+#if PAN_ARCH >= 6
+
 /*
  * Mali does not expose fixed-function tessellation.  These kernels are the
  * hardware-independent libpoly tessellator entry points used by PanVK's
@@ -64,3 +66,5 @@ panlib_prefix_sum_tess(global struct poly_tess_params *p)
    draw[3] = 0;
    draw[4] = 0;
 }
+
+#endif
