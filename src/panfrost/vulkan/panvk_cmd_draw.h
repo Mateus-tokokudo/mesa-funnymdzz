@@ -214,6 +214,23 @@ struct panvk_cmd_graphics_state {
    } vs;
 
    struct {
+      /* The API vertex shader is executed as compute when tessellation is
+       * active.  gfx.vs.shader remains the hardware raster stage (TES). */
+      const struct panvk_shader *input_vs;
+      const struct panvk_shader *tcs;
+      const struct panvk_shader *tes;
+
+      struct panvk_shader_desc_state vs_desc;
+      struct panvk_shader_desc_state tcs_desc;
+      uint64_t vs_push_uniforms;
+      uint64_t tcs_push_uniforms;
+
+      struct panvk_tess_info info;
+      enum mesa_prim prim;
+      bool active;
+   } tess;
+
+   struct {
       struct panvk_attrib_buf bufs[MAX_VBS];
       unsigned count;
    } vb;

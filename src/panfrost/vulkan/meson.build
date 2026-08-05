@@ -172,6 +172,7 @@ foreach arch : [6, 7, 10, 12, 13, 14]
       inc_include,
       inc_src,
       inc_panfrost,
+      inc_poly,
       inc_panvk_per_arch,
     ],
     dependencies : [
@@ -217,6 +218,7 @@ libvulkan_panfrost = shared_library(
     libpanfrost_decode,
     libpanfrost_lib,
     libpanfrost_compiler,
+    libpoly_nir,
   ],
   dependencies : [
     dep_dl,
@@ -226,6 +228,7 @@ libvulkan_panfrost = shared_library(
     dep_thread,
     dep_valgrind,
     idep_nir,
+    idep_libpoly,
     idep_pan_packers,
     panvk_deps,
     idep_vulkan_util,

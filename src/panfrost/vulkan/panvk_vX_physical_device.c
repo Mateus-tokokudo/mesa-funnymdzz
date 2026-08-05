@@ -306,7 +306,7 @@ panvk_per_arch(get_physical_device_features)(
       .imageCubeArray = true,
       .independentBlend = true,
       .geometryShader = false,
-      .tessellationShader = false,
+      .tessellationShader = PAN_ARCH >= 10,
       .sampleRateShading = true,
       .dualSrcBlend = true,
       .logicOp = true,
@@ -339,7 +339,7 @@ panvk_per_arch(get_physical_device_features)(
          (PAN_ARCH >= 13 && instance->drirc.misc.enable_vertex_pipeline_stores_atomics) ||
          instance->drirc.misc.force_enable_shader_atomics,
       .fragmentStoresAndAtomics = true,
-      .shaderTessellationAndGeometryPointSize = false,
+      .shaderTessellationAndGeometryPointSize = PAN_ARCH >= 10,
       .shaderImageGatherExtended = true,
       .shaderStorageImageExtendedFormats = true,
       .shaderStorageImageMultisample = false,
@@ -915,15 +915,19 @@ panvk_per_arch(get_physical_device_properties)(
       .maxVertexInputBindingStride = MESA_VK_MAX_VERTEX_BINDING_STRIDE,
       /* 32 vec4 varyings. */
       .maxVertexOutputComponents = 128,
-      /* Tesselation shaders not supported. */
-      .maxTessellationGenerationLevel = 0,
-      .maxTessellationPatchSize = 0,
-      .maxTessellationControlPerVertexInputComponents = 0,
-      .maxTessellationControlPerVertexOutputComponents = 0,
-      .maxTessellationControlPerPatchOutputComponents = 0,
-      .maxTessellationControlTotalOutputComponents = 0,
-      .maxTessellationEvaluationInputComponents = 0,
-      .maxTessellationEvaluationOutputComponents = 0,
+      /* Tessellation is implemented through libpoly compute prepasses. */
+      .maxTessellationGenerationLevel = PAN_ARCH >= 10 ? 64 : 0,
+      .maxTessellationPatchSize = PAN_ARCH >= 10 ? 32 : 0,
+      .maxTessellationControlPerVertexInputComponents =
+         PAN_ARCH >= 10 ? 128 : 0,
+      .maxTessellationControlPerVertexOutputComponents =
+         PAN_ARCH >= 10 ? 128 : 0,
+      .maxTessellationControlPerPatchOutputComponents =
+         PAN_ARCH >= 10 ? 120 : 0,
+      .maxTessellationControlTotalOutputComponents =
+         PAN_ARCH >= 10 ? 4096 : 0,
+      .maxTessellationEvaluationInputComponents = PAN_ARCH >= 10 ? 128 : 0,
+      .maxTessellationEvaluationOutputComponents = PAN_ARCH >= 10 ? 128 : 0,
       /* Geometry shaders not supported. */
       .maxGeometryShaderInvocations = 0,
       .maxGeometryInputComponents = 0,

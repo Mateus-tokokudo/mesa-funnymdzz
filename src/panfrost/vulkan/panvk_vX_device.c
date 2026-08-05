@@ -43,6 +43,7 @@
 #include "util/u_printf.h"
 #include "pan_props.h"
 #include "pan_samples.h"
+#include "poly/geometry.h"
 
 static void *
 panvk_kmod_zalloc(const struct pan_kmod_allocator *allocator, size_t size,
@@ -622,6 +623,24 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
                        pan_sample_positions_buffer_size());
 
 #if PAN_ARCH >= 10
+   /* Device-global libpoly bump heap.  The command stream resets the atomic
+    * bottom pointer once before its first software-poly draw. */
+   const uint64_t poly_heap_size = 128ull * 1024 * 1024;
+   result = panvk_priv_bo_create(
+      device, poly_heap_size,
+      panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_WB_MMAP),
+      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->poly_heap);
+   if (result != VK_SUCCESS)
+      goto err_free_priv_bos;
+
+   struct poly_heap *poly_heap = device->poly_heap->addr.host;
+   *poly_heap = (struct poly_heap){
+      .base = device->poly_heap->addr.dev + sizeof(*poly_heap),
+      .bottom = 0,
+      .size = poly_heap_size - sizeof(*poly_heap),
+   };
+   panvk_priv_bo_flush(device->poly_heap, 0, sizeof(*poly_heap));
+
    result = panvk_per_arch(init_tiler_oom)(device);
    if (result != VK_SUCCESS)
       goto err_free_priv_bos;
@@ -712,6 +731,7 @@ err_free_priv_bos:
    panvk_priv_bo_unref(device->printf.bo);
    panvk_priv_bo_unref(device->tiler_oom.handlers_bo);
    panvk_priv_bo_unref(device->sample_positions);
+   panvk_priv_bo_unref(device->poly_heap);
    panvk_priv_bo_unref(device->indirect_varying_buffer);
    panvk_priv_bo_unref(device->tiler_heap);
    panvk_device_cleanup_mempools(device);
@@ -764,6 +784,7 @@ panvk_per_arch(destroy_device)(struct panvk_device *device,
    u_printf_destroy(&device->printf.ctx);
    panvk_priv_bo_unref(device->printf.bo);
    panvk_priv_bo_unref(device->tiler_oom.handlers_bo);
+   panvk_priv_bo_unref(device->poly_heap);
    panvk_priv_bo_unref(device->indirect_varying_buffer);
    panvk_priv_bo_unref(device->tiler_heap);
    panvk_priv_bo_unref(device->sample_positions);

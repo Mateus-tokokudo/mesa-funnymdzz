@@ -71,6 +71,7 @@ struct panvk_device {
    } kmod;
 
    struct panvk_priv_bo *tiler_heap;
+   struct panvk_priv_bo *poly_heap;
    struct panvk_priv_bo *indirect_varying_buffer;
    struct panvk_priv_bo *sample_positions;
 

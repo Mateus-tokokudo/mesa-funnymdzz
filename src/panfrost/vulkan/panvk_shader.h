@@ -108,6 +108,12 @@ struct panvk_common_sysvals_inner {
 
    /* Address of the printf buffer */
    aligned_u64 printf_buffer_address;
+
+   /* libpoly state used by software geometry/tessellation stages.  Keeping
+    * these in the common block gives compute-lowered VS/TCS and the hardware
+    * VS-lowered TES identical offsets. */
+   aligned_u64 vertex_param_buffer_poly;
+   aligned_u64 tess_param_buffer_poly;
 } __attribute__((aligned(FAU_WORD_SIZE)));
 
 struct panvk_common_sysvals {
@@ -436,12 +442,40 @@ struct panvk_shader_variant {
    const char *asm_str;
 };
 
+struct panvk_tess_info {
+   enum tess_primitive_mode mode : 8;
+   enum gl_tess_spacing spacing : 8;
+   bool points;
+   bool ccw;
+};
+static_assert(sizeof(struct panvk_tess_info) == 4, "packed");
+
+static inline struct panvk_tess_info
+panvk_tess_info_merge(struct panvk_tess_info a, struct panvk_tess_info b)
+{
+   static_assert(TESS_PRIMITIVE_UNSPECIFIED == 0, "zero state");
+   static_assert(TESS_SPACING_UNSPECIFIED == 0, "zero state");
+
+   uint32_t x, y;
+   memcpy(&x, &a, sizeof(x));
+   memcpy(&y, &b, sizeof(y));
+   x |= y;
+
+   struct panvk_tess_info out;
+   memcpy(&out, &x, sizeof(out));
+   return out;
+}
+
 enum panvk_vs_variant {
    /* Hardware vertex shader, when next stage is fragment */
    PANVK_VS_VARIANT_HW,
 
    /* Vertex shader dispatched as compute for transform feedback. */
    PANVK_VS_VARIANT_XFB,
+
+   /* Vertex shader dispatched as compute before a tessellation control
+    * shader. */
+   PANVK_VS_VARIANT_SW,
 
    PANVK_VS_VARIANTS,
 };
@@ -450,6 +484,18 @@ struct panvk_shader {
    struct vk_shader vk;
 
    struct panvk_shader_desc_info desc_info;
+
+   struct {
+      /* Vertex outputs consumed by the compute-lowered TCS path. */
+      uint64_t vs_outputs;
+
+      uint64_t tcs_per_vertex_outputs;
+      uint32_t tcs_output_stride;
+      uint8_t tcs_output_patch_size;
+      uint8_t tcs_nr_patch_outputs;
+
+      struct panvk_tess_info info;
+   } tess;
 
    struct panvk_shader_variant variants[];
 };
@@ -466,6 +512,7 @@ panvk_shader_num_variants(mesa_shader_stage stage)
 static const char *panvk_vs_shader_variant_name[] = {
    [PANVK_VS_VARIANT_HW] = NULL,
    [PANVK_VS_VARIANT_XFB] = "xfb",
+   [PANVK_VS_VARIANT_SW] = "tessellation",
 };
 
 static const char *
@@ -511,6 +558,16 @@ panvk_shader_xfb_variant(const struct panvk_shader *shader)
       return NULL;
 
    return &shader->variants[PANVK_VS_VARIANT_XFB];
+}
+
+static const struct panvk_shader_variant *
+panvk_shader_sw_variant(const struct panvk_shader *shader)
+{
+   if (!shader)
+      return NULL;
+
+   assert(shader->vk.stage == MESA_SHADER_VERTEX);
+   return &shader->variants[PANVK_VS_VARIANT_SW];
 }
 
 static inline uint64_t

@@ -992,6 +992,7 @@ with_llvm = with_llvm \
 
 with_poly = [
   with_gallium_asahi, with_asahi_vk, with_tools.contains('asahi'),
+  with_panfrost_vk,
   with_kosmickrisp_vk,
 ].contains(true)
 
