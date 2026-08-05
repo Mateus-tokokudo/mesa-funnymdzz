@@ -234,24 +234,50 @@ is_latency_hiding_message(const bi_instr *I)
  * heuristic: choose the instruction that has the best effect on liveness.
  */
 static struct sched_node *
-choose_instr(struct sched_ctx *s)
+choose_instr(struct sched_ctx *s, signed pressure, signed pressure_limit,
+             bool valhall)
 {
    int32_t min_delta = INT32_MAX;
+   int32_t min_non_message_delta = INT32_MAX;
    struct sched_node *best = NULL;
+   struct sched_node *best_non_message = NULL;
 
    list_for_each_entry(struct sched_node, n, &s->dag->heads, dag.link) {
       int32_t delta = calculate_pressure_delta(n->instr, s->live);
+      bool message = is_latency_hiding_message(n->instr);
+
+      if (!message && delta < min_non_message_delta) {
+         best_non_message = n;
+         min_non_message_delta = delta;
+      }
 
       if (delta < min_delta ||
           (delta == min_delta && best &&
            is_latency_hiding_message(best->instr) &&
-           !is_latency_hiding_message(n->instr))) {
+           !message)) {
          if (delta == min_delta && best)
             s->latency_tiebreak_used = true;
 
          best = n;
          min_delta = delta;
       }
+   }
+
+   /* Register pressure only affects occupancy when it crosses the block's
+    * existing high-water mark.  If the pressure-greedy choice would issue an
+    * input message late, use otherwise idle pressure headroom to schedule
+    * independent work first.  In the resulting forward schedule the message
+    * is hoisted and its consumer chain is pushed away, hiding latency without
+    * reducing occupancy.
+    *
+    * Keep this Valhall-only. Bifrost has a separate clause scheduler with its
+    * own message placement constraints after register allocation.
+    */
+   if (valhall && best && is_latency_hiding_message(best->instr) &&
+       best_non_message &&
+       pressure + min_non_message_delta <= pressure_limit) {
+      best = best_non_message;
+      s->latency_tiebreak_used = true;
    }
 
    return best;
@@ -286,7 +312,8 @@ pressure_schedule_block(bi_context *ctx, bi_block *block, struct sched_ctx *s)
    nr_ins = 0;
 
    while (!list_is_empty(&s->dag->heads)) {
-      struct sched_node *node = choose_instr(s);
+      struct sched_node *node =
+         choose_instr(s, pressure, orig_max_pressure, ctx->arch >= 9);
       pressure += calculate_pressure_delta(node->instr, s->live);
       max_pressure = MAX2(pressure, max_pressure);
       dag_prune_head(s->dag, &node->dag);
