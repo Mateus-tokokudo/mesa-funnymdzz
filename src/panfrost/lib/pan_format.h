@@ -193,6 +193,8 @@ pan_blendable_format_table(unsigned arch)
    FMT_TABLE(7);
    FMT_TABLE(9);
    FMT_TABLE(10);
+   case 11:
+   return pan_blendable_formats_v10;
    FMT_TABLE(12);
    FMT_TABLE(13);
    FMT_TABLE(14);
@@ -224,6 +226,8 @@ pan_format_table(unsigned arch)
    FMT_TABLE(7);
    FMT_TABLE(9);
    FMT_TABLE(10);
+   case 11:
+   return pan_pipe_format_v10;
    FMT_TABLE(12);
    FMT_TABLE(13);
    FMT_TABLE(14);

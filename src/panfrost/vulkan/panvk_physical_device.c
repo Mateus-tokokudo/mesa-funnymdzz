@@ -18,6 +18,10 @@
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/sync_file.h>
 
 #include "util/disk_cache.h"
 #include "util/cnd_monotonic.h"
@@ -35,6 +39,7 @@
 #include "vk_log.h"
 #include "vk_physical_device.h"
 #include "vk_util.h"
+#include "vk_sync.h"
 
 #include "panvk_device.h"
 #include "panvk_entrypoints.h"
@@ -669,9 +674,13 @@ kbase_cpu_sync_init(struct vk_device *device, struct vk_sync *sync,
 }
 
 static void
+kbase_sync_file_waiter_free(struct kbase_cpu_sync *ks);
+
+static void
 kbase_cpu_sync_finish(UNUSED struct vk_device *device, struct vk_sync *sync)
 {
    struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
+   kbase_sync_file_waiter_free(ks);
    u_cnd_monotonic_destroy(&ks->cond);
    mtx_destroy(&ks->mutex);
 }
@@ -882,6 +891,197 @@ kbase_cpu_sync_move(UNUSED struct vk_device *device, struct vk_sync *dst,
    return VK_SUCCESS;
 }
 
+struct kbase_sync_file_waiter {
+   int fd;
+};
+
+static VkResult
+kbase_sync_file_wait_func(void *data, UNUSED const uint64_t *targets,
+                          uint64_t abs_timeout_ns)
+{
+   struct kbase_sync_file_waiter *waiter = data;
+   if (waiter->fd < 0)
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+
+   int timeout_ms;
+   if (abs_timeout_ns == 0xFFFFFFFFFFFFFFFFULL) {
+      timeout_ms = -1;
+   } else {
+      uint64_t now = os_time_get_nano();
+      if (abs_timeout_ns <= now)
+         timeout_ms = 0;
+      else
+         timeout_ms = (int)((abs_timeout_ns - now) / 1000000ull);
+   }
+
+   struct pollfd pfd = {
+      .fd = waiter->fd,
+      .events = POLLIN | POLLERR | POLLHUP,
+   };
+
+   while (true) {
+      int ret = poll(&pfd, 1, timeout_ms);
+      if (ret > 0) {
+         if (pfd.revents & (POLLERR | POLLHUP))
+            return VK_ERROR_DEVICE_LOST;
+         return VK_SUCCESS;
+      } else if (ret == 0) {
+         return VK_TIMEOUT;
+      } else if (errno != EINTR && errno != EAGAIN) {
+         return VK_ERROR_UNKNOWN;
+      }
+   }
+}
+
+static void
+kbase_sync_file_waiter_free(struct kbase_cpu_sync *ks)
+{
+   if (ks->pending_wait == kbase_sync_file_wait_func && ks->pending_data) {
+      struct kbase_sync_file_waiter *waiter = ks->pending_data;
+      if (waiter->fd >= 0)
+         close(waiter->fd);
+      free(waiter);
+      ks->pending_data = NULL;
+      ks->pending_wait = NULL;
+   }
+}
+
+static VkResult
+kbase_cpu_sync_import_sync_file(struct vk_device *device,
+                                struct vk_sync *sync,
+                                int sync_file)
+{
+   struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
+
+   if (sync_file < 0) {
+      return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                       "Invalid sync_file fd: %d", sync_file);
+   }
+
+   int fd = dup(sync_file);
+   if (fd < 0)
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY, "dup() failed: %m");
+
+   struct kbase_sync_file_waiter *waiter = malloc(sizeof(*waiter));
+   if (!waiter) {
+      close(fd);
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY, "allocation failed");
+   }
+   waiter->fd = fd;
+
+   uint64_t targets[PANVK_KBASE_SYNC_TARGET_COUNT] = {0};
+
+   mtx_lock(&ks->mutex);
+   kbase_sync_file_waiter_free(ks);
+   mtx_unlock(&ks->mutex);
+
+   panvk_kbase_sync_set_pending(sync, waiter, kbase_sync_file_wait_func, targets);
+
+   return VK_SUCCESS;
+}
+
+#ifndef SW_SYNC_IOC_CREATE_FENCE
+struct sw_sync_create_fence_data {
+   __u32 value;
+   char name[32];
+   __s32 fence;
+};
+#define SW_SYNC_IOC_MAGIC 'W'
+#define SW_SYNC_IOC_CREATE_FENCE _IOWR(SW_SYNC_IOC_MAGIC, 0, struct sw_sync_create_fence_data)
+#define SW_SYNC_IOC_INC          _IOW(SW_SYNC_IOC_MAGIC, 1, __u32)
+#endif
+
+static void *
+kbase_export_signaler_thread(void *arg)
+{
+   struct {
+      struct vk_device *device;
+      struct kbase_cpu_sync *ks;
+      int timeline_fd;
+   } *ctx = arg;
+
+   struct vk_sync_wait wait = {
+      .sync = &ctx->ks->sync,
+      .wait_value = 0,
+   };
+
+   VkResult res = kbase_cpu_sync_wait_many(ctx->device, 1, &wait,
+                                           VK_SYNC_WAIT_COMPLETE,
+                                           0xFFFFFFFFFFFFFFFFULL);
+   if (res == VK_SUCCESS) {
+      uint32_t inc = 1;
+      ioctl(ctx->timeline_fd, SW_SYNC_IOC_INC, &inc);
+   }
+
+   close(ctx->timeline_fd);
+   free(ctx);
+   return NULL;
+}
+
+static VkResult
+kbase_cpu_sync_export_sync_file(struct vk_device *device,
+                                struct vk_sync *sync,
+                                int *sync_file)
+{
+   struct kbase_cpu_sync *ks = container_of(sync, struct kbase_cpu_sync, sync);
+
+   /* If already signaled, return an already-signaled sync_file FD using sw_sync */
+   int timeline_fd = open("/dev/sw_sync", O_RDWR | O_CLOEXEC);
+   if (timeline_fd < 0) {
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
+                       "Failed to open /dev/sw_sync: %m");
+   }
+
+   struct sw_sync_create_fence_data create_fence = {
+      .value = 1,
+      .name = "panvk_signal_fence",
+      .fence = -1,
+   };
+
+   if (ioctl(timeline_fd, SW_SYNC_IOC_CREATE_FENCE, &create_fence) < 0) {
+      close(timeline_fd);
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY,
+                       "SW_SYNC_IOC_CREATE_FENCE failed: %m");
+   }
+
+   mtx_lock(&ks->mutex);
+   bool already_signaled = (ks->state == KBASE_CPU_SYNC_SIGNALED);
+   mtx_unlock(&ks->mutex);
+
+   if (already_signaled) {
+      uint32_t inc = 1;
+      ioctl(timeline_fd, SW_SYNC_IOC_INC, &inc);
+      close(timeline_fd);
+      *sync_file = create_fence.fence;
+      return VK_SUCCESS;
+   }
+
+   /* Spawn worker thread to signal fence when CPU sync completes */
+   pthread_t thread;
+   typedef void *(*pthread_func)(void *);
+
+   struct {
+      struct vk_device *device;
+      struct kbase_cpu_sync *ks;
+      int timeline_fd;
+   } *ctx = malloc(sizeof(*ctx));
+
+   ctx->device = device;
+   ctx->ks = ks;
+   ctx->timeline_fd = timeline_fd;
+
+   if (pthread_create(&thread, NULL, (pthread_func)kbase_export_signaler_thread, ctx) != 0) {
+      free(ctx);
+      close(create_fence.fence);
+      close(timeline_fd);
+      return vk_errorf(device, VK_ERROR_OUT_OF_HOST_MEMORY, "pthread_create failed");
+   }
+   pthread_detach(thread);
+
+   *sync_file = create_fence.fence;
+   return VK_SUCCESS;
+}
+
 static const struct vk_sync_type kbase_cpu_sync_type = {
    .size      = sizeof(struct kbase_cpu_sync),
    .features  = VK_SYNC_FEATURE_BINARY |
@@ -898,6 +1098,8 @@ static const struct vk_sync_type kbase_cpu_sync_type = {
    .reset     = kbase_cpu_sync_reset,
    .wait_many = kbase_cpu_sync_wait_many,
    .move      = kbase_cpu_sync_move,
+   .import_sync_file = kbase_cpu_sync_import_sync_file,
+   .export_sync_file = kbase_cpu_sync_export_sync_file,
 };
 
 /* Set up sync types for a kbase (non-DRM) physical device.
@@ -1142,6 +1344,7 @@ panvk_physical_device_init_kbase(struct panvk_physical_device *device,
       break;
 
    case 10:
+   case 11:
    case 12:
    case 13:
       break;
@@ -1914,7 +2117,7 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
 
       /* TODO: switch to using a more generic function for checking mod support here
        * when adding new modifiers, so that this case doesn't become too big. */
-      const bool can_use_afbc = 
+      const bool can_use_afbc =
          PANVK_DEBUG(WSI_AFBC) &&
          panvk_image_can_use_afbc(physical_device, info->format, info->usage,
                                   info->type, info->tiling, 0);

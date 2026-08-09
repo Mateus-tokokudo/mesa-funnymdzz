@@ -12,6 +12,7 @@
 #include "panvk_cmd_buffer.h"
 #include "panvk_device_memory.h"
 #include "panvk_macros.h"
+#include "panvk_physical_device.h"
 #include "panvk_priv_bo.h"
 #include "panvk_queue.h"
 #include "panvk_utrace.h"
@@ -462,7 +463,7 @@ kbase_subqueue_reserve_ring(struct panvk_gpu_queue *queue,
 static VkResult
 kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
                         uint64_t stream_addr, uint32_t stream_size,
-                        uint32_t flush_id)
+                        uint32_t flush_id, uint64_t gpu_id)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    const struct drm_panthor_csif_info *csif_info = panvk_get_csif_props(dev);
@@ -671,6 +672,21 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
              subqueue, subq->kbase.emitted_jobs, offset, entry_size,
              padded_size, stream_addr, stream_size, flush_id);
 
+   if (dev->debug.decode_ctx) {
+      pandecode_user_msg(dev->debug.decode_ctx,
+         "\nSubqueue %d Ringbuffer Trampoline [job %lu, gpu_va: %lx, cpu=%p, Size %u bytes, to %lx]:\n",
+         subqueue, subq->kbase.emitted_jobs, subq->kbase.ringbuf_dev + offset,
+         subq->kbase.ringbuf_cpu + offset, padded_size, stream_addr);
+
+      pandecode_cs_binary(dev->debug.decode_ctx,
+                           subq->kbase.ringbuf_dev + offset,
+                           padded_size,
+                           gpu_id);
+   } else {
+      mesa_loge("%s: decode context not available, skipping CS binary dump",
+                __func__);
+   }
+
    return VK_SUCCESS;
 }
 
@@ -714,6 +730,7 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                           uint64_t target_seqno, uint32_t rekick_mask,
                           bool allow_ring_drain, uint64_t abs_timeout_ns)
 {
+   mesa_logi("%s: waiting for seqno %" PRIu64, __func__, target_seqno);
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct panvk_subqueue *subq = &queue->subqueues[subqueue];
    volatile struct panvk_cs_sync64 *cell =
@@ -733,6 +750,7 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
    volatile uint32_t *stream_progress =
       (volatile uint32_t *)((volatile uint8_t *)cell +
                             KBASE_SEQNO_STREAM_PROGRESS_OFFSET);
+   const uint8_t *input_page = (uint8_t *)subq->kbase.user_io + 4096;
    const uint8_t *output_page = (uint8_t *)subq->kbase.user_io + 8192;
    uint64_t target_insert = subq->kbase.insert;
    uint64_t seqno_addr = kbase_subqueue_seqno_dev_addr(queue, subqueue);
@@ -740,17 +758,24 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
    int64_t last_kick = start;
    uint64_t watchdog = (uint64_t)start + KBASE_WAIT_TIMEOUT_NS;
    uint64_t deadline = MIN2(abs_timeout_ns, watchdog);
+   mesa_logd("kbase: starting subqueue %u job %" PRIu64
+             ": seqno %" PRIu64 ", ls_copy %" PRIu64
+             ", stream progress 0x%x",
+             subqueue, target_seqno, (uint64_t)cell->seqno, *ls_copy,
+             *stream_progress);
 
    /* CS_EXTRACT only reports how far firmware has fetched the command stream;
     * asynchronous GPU jobs issued by those commands may still be running.
     * Only accept the completion writes emitted after the all-scoreboard wait.
     */
    while (true) {
+      uint64_t insert = *(volatile uint64_t *)(input_page +
+                                                CS_USER_IO_INPUT_CS_INSERT);
       uint64_t extract = *(volatile uint64_t *)(output_page +
                                                 CS_USER_IO_OUTPUT_CS_EXTRACT);
       uint32_t active = *(volatile uint32_t *)(output_page +
                                                CS_USER_IO_OUTPUT_CS_ACTIVE);
-
+      mesa_logi("kbase_subqueue_wait_seqno: insert=%lu, extract=%lu, active=%u, target_insert=%lu", insert, extract, active, target_insert);
       kbase_cache_invalidate_range((const void *)cell, kbase_seqno_stride());
       if (cell->seqno >= target_seqno ||
           (PANVK_DEBUG(KBASE_DIAG) && *ls_copy >= target_seqno) ||
@@ -878,6 +903,8 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
              subqueue, target_seqno, (uint64_t)cell->seqno, *ls_copy,
              *stream_progress, completed ? "" : " (ring-drain init fallback)");
 
+   print_stack_trace();
+
    return VK_SUCCESS;
 }
 
@@ -896,10 +923,14 @@ kbase_queue_wait_current(struct panvk_gpu_queue *queue,
       VkResult result = kbase_subqueue_wait_seqno(
          queue, i, queue->subqueues[i].kbase.emitted_jobs, target_mask, false,
          abs_timeout_ns);
-      if (result != VK_SUCCESS)
+      if (result != VK_SUCCESS) {
+         mesa_loge("%s: failed to wait for subqueue %u seqno %" PRIu64,
+                   __func__, i, queue->subqueues[i].kbase.emitted_jobs);
          return result;
+      }
    }
 
+   mesa_logi("%s: wait completed successfully", __func__);
    return VK_SUCCESS;
 }
 
@@ -951,6 +982,7 @@ kbase_create_group(struct panvk_gpu_queue *queue)
       subq->kbase.ringbuf_bo =
          pan_kmod_bo_alloc(dev->kmod.dev, dev->kmod.vm, KBASE_RINGBUF_SIZE,
                            0);
+      // TODO: register this mapping
       if (!subq->kbase.ringbuf_bo) {
          result = panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
                                "Failed to allocate a kbase CS ring buffer");
@@ -984,6 +1016,11 @@ kbase_create_group(struct panvk_gpu_queue *queue)
          goto err_destroy_group;
       }
       subq->kbase.ringbuf_dev = op.va.start;
+
+      if (dev->debug.decode_ctx) {
+         pandecode_inject_mmap(dev->debug.decode_ctx, subq->kbase.ringbuf_dev,
+                               subq->kbase.ringbuf_cpu, KBASE_RINGBUF_SIZE, "kbase_ringbuf");
+      }
 
       subq->kbase.user_io = kbase_kmod_csf_queue_bind(
          dev->kmod.dev, subq->kbase.group_handle, 0,
@@ -1277,6 +1314,7 @@ static VkResult
 kbase_submit_init_subqueues(struct panvk_gpu_queue *queue)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
+   struct panvk_physical_device *phys_dev = to_panvk_physical_device(dev->vk.physical);
    uint32_t touched = 0;
 
    for (uint32_t subqueue = 0; subqueue < PANVK_SUBQUEUE_COUNT; subqueue++) {
@@ -1288,7 +1326,8 @@ kbase_submit_init_subqueues(struct panvk_gpu_queue *queue)
       VkResult res =
          kbase_subqueue_emit_job(queue, subqueue, subq->kbase.init_stream_addr,
                                  subq->kbase.init_stream_size,
-                                 subq->kbase.init_flush_id);
+                                 subq->kbase.init_flush_id,
+                                 phys_dev->kmod.dev->props.gpu_id);
       if (res != VK_SUCCESS)
          return panvk_errorf(dev->vk.physical, VK_ERROR_INITIALIZATION_FAILED,
                              "Failed to initialize subqueue");
@@ -1380,7 +1419,7 @@ init_subqueue_tracing(struct panvk_gpu_queue *queue,
       panvk_as_free(dev, dev->as.priv_heap, dev_addr,
                     subq->tracebuf.size + pgsize);
       return panvk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                          "Failed to GPU map ringbuf BO");
+                          "Failed to GPU map ringbuf BO"); // FAILED panvk_vX_gpu_queue
    }
 
    subq->tracebuf.addr.dev = dev_addr;
@@ -2570,6 +2609,7 @@ kbase_wait_sync_targets(
          return result;
    }
 
+   mesa_logi("kbase_wait_sync_targets: targets = { %lu, %lu, %lu } succeeded", targets[0], targets[1], targets[2]);
    return VK_SUCCESS;
 }
 
@@ -2607,6 +2647,26 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
    struct panvk_gpu_queue *queue = submit->queue;
    VkResult result;
 
+   // struct pandecode_context *decode_ctx = submit->dev->debug.decode_ctx;
+   // const struct pan_kmod_dev_props *props =
+   //    &submit->phys_dev->kmod.dev->props;
+   // if (decode_ctx) {
+   //    for (uint32_t i = 0; i < submit->qsubmit_count; i++) {
+   //       const struct drm_panthor_queue_submit *qsubmit = &submit->qsubmits[i];
+   //       if (!qsubmit->stream_size)
+   //          continue;
+
+   //       pandecode_user_msg(decode_ctx, "CS %d on subqueue %d binaries\n\n", i,
+   //                         qsubmit->queue_index);
+   //       pandecode_cs_binary(decode_ctx, qsubmit->stream_addr,
+   //                         qsubmit->stream_size, props->gpu_id);
+   //       pandecode_user_msg(decode_ctx, "\n");
+   //    }
+   // } else {
+   //    mesa_loge("%s: decode context not available, skipping CS binary dump",
+   //              __func__);
+   // }
+
    if (vk_submit->wait_count) {
       result = vk_sync_wait_many(&dev->vk, vk_submit->wait_count,
                                  vk_submit->waits, VK_SYNC_WAIT_COMPLETE,
@@ -2629,7 +2689,8 @@ panvk_queue_submit_ioctl_kbase(struct panvk_queue_submit *submit,
       result = kbase_subqueue_emit_job(queue, qsubmit->queue_index,
                                        qsubmit->stream_addr,
                                        qsubmit->stream_size,
-                                       qsubmit->latest_flush);
+                                       qsubmit->latest_flush,
+                                       submit->phys_dev->kmod.dev->props.gpu_id);
       if (result != VK_SUCCESS)
          return vk_queue_set_lost(&queue->vk, "kbase: ring emission failed");
 
@@ -2853,8 +2914,8 @@ panvk_queue_submit_process_debug(const struct panvk_queue_submit *submit,
       }
    }
 
-   if (PANVK_DEBUG(DUMP))
-      pandecode_dump_mappings(decode_ctx);
+   // if (PANVK_DEBUG(DUMP))
+   //    pandecode_dump_mappings(decode_ctx);
 
    if (PANVK_DEBUG(TRACE))
       pandecode_next_frame(decode_ctx);

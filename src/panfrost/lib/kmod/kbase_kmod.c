@@ -1491,6 +1491,7 @@ kbase_kmod_import_dmabuf(struct pan_kmod_dev *dev,
 
    pan_kmod_bo_init(&kbase_bo->base, dev, exclusive_vm, bo_size, flags,
                     handle);
+   mesa_logi("kbase_kmod_bo_alloc_dmabuf: succeeded for %d, bo_size=%lu, handle=%u", kbase_bo->dmabuf_fd, bo_size, handle);
    return &kbase_bo->base;
 
 err_unmap_gpu:
@@ -1634,6 +1635,9 @@ kbase_kmod_bo_alloc(struct pan_kmod_dev *dev,
    kbase_bo->cpu_ptr = cpu_ptr;
    kbase_bo->gpu_mapping = cpu_ptr;
    kbase_bo->gpu_va = kbase_bo->same_va ? (uintptr_t)cpu_ptr : alloc_gpu_va;
+
+   mesa_logi("%s: successfully allocated gpu_va=%" PRIx64 " cpu=%p size=%zu",
+             __func__, kbase_bo->gpu_va, kbase_bo->cpu_ptr, kbase_bo->base.size);
 
    /* Allocate a unique u32 handle for the pan_kmod handle_to_bo table. */
    uint32_t handle = p_atomic_inc_return(&kbase_dev->next_handle);

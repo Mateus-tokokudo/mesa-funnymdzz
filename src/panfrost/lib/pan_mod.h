@@ -101,6 +101,7 @@ pan_mod_get_handler(unsigned arch, uint64_t modifier)
    case 9:
       return pan_mod_get_handler_v9(modifier);
    case 10:
+   case 11:
       return pan_mod_get_handler_v10(modifier);
    case 12:
       return pan_mod_get_handler_v12(modifier);
