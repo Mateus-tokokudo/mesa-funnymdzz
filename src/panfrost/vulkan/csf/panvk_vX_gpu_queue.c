@@ -903,7 +903,7 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
              subqueue, target_seqno, (uint64_t)cell->seqno, *ls_copy,
              *stream_progress, completed ? "" : " (ring-drain init fallback)");
 
-   print_stack_trace();
+   // print_stack_trace();
 
    return VK_SUCCESS;
 }
