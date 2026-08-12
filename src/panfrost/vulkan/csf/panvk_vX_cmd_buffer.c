@@ -14,6 +14,7 @@
 
 #include "genxml/gen_macros.h"
 
+#include "cs_builder.h"
 #include "panvk_buffer.h"
 #include "panvk_cmd_alloc.h"
 #include "panvk_cmd_buffer.h"
@@ -75,7 +76,8 @@ panvk_per_arch(kbase_mark_progress)(
                 offsetof(struct panvk_cs_subqueue_context,
                          debug.kbase_progress_addr));
    cs_move32_to(b, value, marker);
-   cs_store32(b, value, addr, 0);
+   // cs_store32(b, value, addr, 0);
+   cs_sync32_add(b, true, MALI_CS_SYNC_SCOPE_CSG, value, addr, cs_now());
    cs_flush_stores(b);
 }
 

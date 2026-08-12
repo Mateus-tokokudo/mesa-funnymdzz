@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdint.h>
 #include "drm-uapi/panthor_drm.h"
 
 #include "genxml/cs_builder.h"
@@ -649,6 +650,7 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
              padded_size - entry_size);
    }
 
+   subq->kbase.last_last_job_offset = subq->kbase.last_job_offset;
    subq->kbase.last_job_offset = offset;
    subq->kbase.last_job_size = padded_size;
    subq->kbase.last_job_entry_size = entry_size;
@@ -672,7 +674,7 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
              subqueue, subq->kbase.emitted_jobs, offset, entry_size,
              padded_size, stream_addr, stream_size, flush_id);
 
-   if (dev->debug.decode_ctx) {
+   if (dev->debug.decode_ctx && PANVK_DEBUG(DUMP)) {
       pandecode_user_msg(dev->debug.decode_ctx,
          "\nSubqueue %d Ringbuffer Trampoline [job %lu, gpu_va: %lx, cpu=%p, Size %u bytes, to %lx]:\n",
          subqueue, subq->kbase.emitted_jobs, subq->kbase.ringbuf_dev + offset,
@@ -682,9 +684,6 @@ kbase_subqueue_emit_job(struct panvk_gpu_queue *queue, uint32_t subqueue,
                            subq->kbase.ringbuf_dev + offset,
                            padded_size,
                            gpu_id);
-   } else {
-      mesa_loge("%s: decode context not available, skipping CS binary dump",
-                __func__);
    }
 
    return VK_SUCCESS;
@@ -730,7 +729,6 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                           uint64_t target_seqno, uint32_t rekick_mask,
                           bool allow_ring_drain, uint64_t abs_timeout_ns)
 {
-   mesa_logi("%s: waiting for seqno %" PRIu64, __func__, target_seqno);
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct panvk_subqueue *subq = &queue->subqueues[subqueue];
    volatile struct panvk_cs_sync64 *cell =
@@ -758,16 +756,21 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
    int64_t last_kick = start;
    uint64_t watchdog = (uint64_t)start + KBASE_WAIT_TIMEOUT_NS;
    uint64_t deadline = MIN2(abs_timeout_ns, watchdog);
-   mesa_logd("kbase: starting subqueue %u job %" PRIu64
-             ": seqno %" PRIu64 ", ls_copy %" PRIu64
-             ", stream progress 0x%x",
-             subqueue, target_seqno, (uint64_t)cell->seqno, *ls_copy,
-             *stream_progress);
+   uint32_t last_job_offset = subq->kbase.last_job_offset;
+   uint32_t last_last_job_offset = subq->kbase.last_last_job_offset;
+   // mesa_logd("kbase: starting subqueue %u job %" PRIu64
+   //           ": seqno %" PRIu64 ", ls_copy %" PRIu64
+   //           ", stream progress 0x%x",
+   //           subqueue, target_seqno, (uint64_t)cell->seqno, *ls_copy,
+   //           *stream_progress);
 
    /* CS_EXTRACT only reports how far firmware has fetched the command stream;
     * asynchronous GPU jobs issued by those commands may still be running.
     * Only accept the completion writes emitted after the all-scoreboard wait.
     */
+   uint64_t prev_extract = 0xffffffffffffffffULL;
+   uint64_t prev_seqno = 0xffffffffffffffffULL;
+   int prev_error_type = 0xffffffff;
    while (true) {
       uint64_t insert = *(volatile uint64_t *)(input_page +
                                                 CS_USER_IO_INPUT_CS_INSERT);
@@ -775,7 +778,12 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                                                 CS_USER_IO_OUTPUT_CS_EXTRACT);
       uint32_t active = *(volatile uint32_t *)(output_page +
                                                CS_USER_IO_OUTPUT_CS_ACTIVE);
-      mesa_logi("kbase_subqueue_wait_seqno: insert=%lu, extract=%lu, active=%u, target_insert=%lu", insert, extract, active, target_insert);
+      if (prev_extract != extract || prev_seqno != cell->seqno) {
+         mesa_logi("kbase: running subqueue=%u, insert=%lu, extract=%lu, active=%u, target_insert=%lu, ls_copy=%lu, cell->seqno=%lu, target_seqno=%lu, progress=%x",
+            subqueue, insert, extract, active, target_insert, *ls_copy, cell->seqno, target_seqno, *stream_progress);
+         prev_extract = extract;
+         prev_seqno = cell->seqno;
+      }
       kbase_cache_invalidate_range((const void *)cell, kbase_seqno_stride());
       if (cell->seqno >= target_seqno ||
           (PANVK_DEBUG(KBASE_DIAG) && *ls_copy >= target_seqno) ||
@@ -870,6 +878,24 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
          for (uint32_t i = 0; i < PANVK_SUBQUEUE_COUNT; i++)
             kbase_log_subqueue_state(queue, i, "timeout snapshot");
 
+         if (dev->debug.decode_ctx && insert > extract) {
+            // pandecode_user_msg(dev->debug.decode_ctx,
+            //    "\nSubqueue %d Ringbuffer Trampoline [job %lu, gpu_va: %lx, cpu=%p, Size %u bytes, to %lx]:\n",
+            //    subqueue, subq->kbase.emitted_jobs, subq->kbase.ringbuf_dev + offset,
+            //    subq->kbase.ringbuf_cpu + offset, padded_size, stream_addr);
+            mesa_logi("kbase: csf timeout on subqueue %d @ job %lu / %lu: insert %lu (gpu_va: %lx), extract %lu (gpu_va: %lx)"
+               ", last_job_offset %u (gpu_va: %lx), last_last_job_offset %u (gpu_va: %lx)",
+               subqueue, cell->seqno, target_seqno, insert, subq->kbase.ringbuf_dev + insert,
+               extract, subq->kbase.ringbuf_dev + extract,
+               last_job_offset, subq->kbase.ringbuf_dev + last_job_offset,
+               last_last_job_offset, subq->kbase.ringbuf_dev + last_last_job_offset);
+            struct panvk_physical_device *phys_dev = to_panvk_physical_device(dev->vk.physical);
+            pandecode_cs_binary(dev->debug.decode_ctx,
+                                 subq->kbase.ringbuf_dev + last_last_job_offset,
+                                 insert - last_last_job_offset,
+                                 phys_dev->kmod.dev->props.gpu_id);
+         }
+
          return vk_queue_set_lost(&queue->vk,
                                   "kbase: timeout on subqueue %u", subqueue);
       }
@@ -889,8 +915,29 @@ kbase_subqueue_wait_seqno(struct panvk_gpu_queue *queue, uint32_t subqueue,
                             dev->kmod.dev, seqno_addr, target_seqno - 1,
                             remaining)
                        : -1;
-      if (cqs_ret < 0)
-         kbase_kmod_csf_wait_event(dev->kmod.dev, remaining);
+
+      if (cqs_ret < 0) {
+         int error_type = kbase_kmod_csf_wait_event(dev->kmod.dev, remaining);
+
+         if (dev->debug.decode_ctx && insert > extract && error_type) {
+            // pandecode_user_msg(dev->debug.decode_ctx,
+            //    "\nSubqueue %d Ringbuffer Trampoline [job %lu, gpu_va: %lx, cpu=%p, Size %u bytes, to %lx]:\n",
+            //    subqueue, subq->kbase.emitted_jobs, subq->kbase.ringbuf_dev + offset,
+            //    subq->kbase.ringbuf_cpu + offset, padded_size, stream_addr);
+            mesa_logi("kbase: csf error/potential timeout (error=%d) on subqueue %d @ job %lu / %lu: insert %lu (gpu_va: %lx), extract %lu (gpu_va: %lx)"
+               ", last_job_offset %u (gpu_va: %lx), last_last_job_offset %u (gpu_va: %lx)",
+               error_type, subqueue, cell->seqno, target_seqno, insert, subq->kbase.ringbuf_dev + insert,
+               extract, subq->kbase.ringbuf_dev + extract,
+               last_job_offset, subq->kbase.ringbuf_dev + last_job_offset,
+               last_last_job_offset, subq->kbase.ringbuf_dev + last_last_job_offset);
+            struct panvk_physical_device *phys_dev = to_panvk_physical_device(dev->vk.physical);
+            pandecode_cs_binary(dev->debug.decode_ctx,
+                                 subq->kbase.ringbuf_dev + extract,
+                                 insert - extract,
+                                 phys_dev->kmod.dev->props.gpu_id);
+         }
+         prev_error_type = error_type;
+      }
    }
 
    bool completed =
@@ -2478,11 +2525,12 @@ panvk_queue_submit_init_cmdbufs(struct panvk_queue_submit *submit,
             continue;
 
 #ifdef HAVE_PAN_KMOD_KBASE
-         if (gpu_queue_uses_kbase(dev) && PANVK_DEBUG(KBASE_DIAG)) {
-            kbase_log_stream_prefix(j, cs_root_chunk_gpu_addr(b),
-                                    cs_root_chunk_size(b),
-                                    b->root_chunk.buffer.cpu);
-         }
+         // if (gpu_queue_uses_kbase(dev) && PANVK_DEBUG(KBASE_DIAG)) {
+         //    kbase_log_stream_prefix(j, cs_root_chunk_gpu_addr(b),
+         //                            cs_root_chunk_size(b),
+         //                            b->root_chunk.buffer.cpu);
+         // }
+         // Use csf decoding instead
 #endif
 
          submit->qsubmits[submit->qsubmit_count++] =

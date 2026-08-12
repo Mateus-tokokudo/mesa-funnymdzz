@@ -58,6 +58,7 @@
 #include "kbase_kmod.h"
 #include "pan_kmod_backend.h"
 #include "pan_props.h"
+#include "pan_trace.h"
 
 /* Forward declaration — the full definition is at the end of this file. */
 const struct pan_kmod_ops kbase_kmod_ops;
@@ -584,7 +585,7 @@ kbase_log_csf_queue_error(const char *kind, uint8_t group_handle,
    }
 }
 
-static void
+static int
 kbase_log_csf_notification(struct pan_kmod_dev *dev,
                            const struct base_csf_notification *event)
 {
@@ -592,18 +593,18 @@ kbase_log_csf_notification(struct pan_kmod_dev *dev,
 
    if (event->type == BASE_CSF_NOTIFICATION_EVENT) {
       mesa_logd("kbase: received CSF event notification");
-      return;
+      return 0;
    }
 
    if (event->type == BASE_CSF_NOTIFICATION_CPU_QUEUE_DUMP) {
       mesa_logw("kbase: received CSF CPU queue dump notification");
-      return;
+      return 0;
    }
 
    if (event->type != BASE_CSF_NOTIFICATION_GPU_QUEUE_GROUP_ERROR) {
       mesa_logw("kbase: received unknown CSF notification type %u",
                 event->type);
-      return;
+      return 0;
    }
 
    struct kbase_kmod_dev *kbase_dev =
@@ -613,6 +614,8 @@ kbase_log_csf_notification(struct pan_kmod_dev *dev,
    const uint8_t group_handle = event->payload.csg_error.handle;
    const struct base_gpu_queue_group_error *error =
       &event->payload.csg_error.error;
+
+   int error_type = error->error_type + 1;
 
    switch (error->error_type) {
    case BASE_GPU_QUEUE_GROUP_ERROR_FATAL: {
@@ -660,6 +663,7 @@ kbase_log_csf_notification(struct pan_kmod_dev *dev,
                 error->error_type);
       break;
    }
+   return error_type;
 }
 
 void
@@ -804,9 +808,7 @@ kbase_kmod_csf_wait_event(struct pan_kmod_dev *dev, int64_t timeout_ns)
       return -1;
    }
 
-   kbase_log_csf_notification(dev, &event);
-
-   return 0;
+   return kbase_log_csf_notification(dev, &event);
 }
 
 static int
@@ -879,6 +881,9 @@ kbase_kmod_csf_wait_cqs64(struct pan_kmod_dev *dev, uint64_t addr,
          goto out;
       } else {
          ret = kbase_kcpu_poll_fence(kbase_dev->kcpu.fence_fd, timeout_ns);
+         if (ret < 0) {
+            mesa_loge("kbase: kbase_kcpu_poll_fence (%d) failed: %s", __LINE__, strerror(errno));
+         }
          if (ret == 1) {
             close(kbase_dev->kcpu.fence_fd);
             kbase_dev->kcpu.fence_fd = -1;
@@ -949,6 +954,7 @@ kbase_kmod_csf_wait_cqs64(struct pan_kmod_dev *dev, uint64_t addr,
       kbase_dev->kcpu.fence_fd = -1;
       kbase_dev->kcpu.pending = false;
    } else if (ret < 0) {
+      mesa_loge("kbase: kbase_kcpu_poll_fence failed: %s", strerror(errno));
       goto disable;
    }
    goto out;
@@ -966,6 +972,7 @@ disable:
       ioctl(dev->fd, KBASE_IOCTL_KCPU_QUEUE_DELETE, &delete);
       kbase_dev->kcpu.valid = false;
    }
+   mesa_loge("kbase: kcpu queue disabled due to error");
    ret = -1;
 
 out:
