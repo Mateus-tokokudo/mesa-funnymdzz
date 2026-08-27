@@ -29,6 +29,19 @@
 
 #include "drm-uapi/panfrost_drm.h"
 
+#ifdef HAVE_PAN_KMOD_KBASE
+#include <inttypes.h>
+#include <unistd.h>
+#include "drm-uapi/mali_kbase_ioctl.h"
+#include "kmod/kbase_kmod.h"
+#endif
+
+static bool
+gpu_queue_uses_kbase(const struct panvk_device *dev)
+{
+   return to_panvk_physical_device(dev->vk.physical)->kbase_node_path[0] != '\0';
+}
+
 static void
 panvk_queue_submit_batch(struct panvk_gpu_queue *queue,
                          struct panvk_cmd_buffer *cmdbuf,
@@ -39,14 +52,12 @@ panvk_queue_submit_batch(struct panvk_gpu_queue *queue,
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
    struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(dev->vk.physical);
-   ASSERTED int ret;
+   int ret;
 
-   /* Reset the batch if it's already been issued */
    if (batch->issued) {
       util_dynarray_foreach(&batch->jobs, void *, job)
          memset((*job), 0, 4 * 4);
 
-      /* Reset the tiler before re-issuing the batch */
       if (batch->tiler.ctx_descs.cpu) {
          memcpy(batch->tiler.heap_desc.cpu, &batch->tiler.heap_templ,
                 sizeof(batch->tiler.heap_templ));
@@ -57,13 +68,9 @@ panvk_queue_submit_batch(struct panvk_gpu_queue *queue,
             memcpy(&ctxs[i], &batch->tiler.ctx_templ, sizeof(*ctxs));
       }
 
-      /* We don't keep track of BO <-> job relationship, so let's just flush the
-       * whole desc pool for now. */
       panvk_pool_flush_maps(&cmdbuf->desc_pool);
    }
 
-   /* Flush pending synchronization requests before submitting the job, to
-    * make sure things are GPU-visible. */
    pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
 
    if (batch->vtc_jc.first_job) {
@@ -77,17 +84,17 @@ panvk_queue_submit_batch(struct panvk_gpu_queue *queue,
       };
 
       ret = pan_kmod_ioctl(dev->drm_fd, DRM_IOCTL_PANFROST_SUBMIT, &submit);
-      assert(!ret);
+      if (ret < 0) {
+         mesa_logw("panvk: DRM submission notification for panfrost vtc in the kbase backend: %s",
+                   strerror(errno));
+      }
 
-      if (PANVK_DEBUG(TRACE) || PANVK_DEBUG(SYNC)) {
-         ret = drmSyncobjWait(dev->drm_fd, &submit.out_sync, 1, INT64_MAX, 0,
-                              NULL);
-         assert(!ret);
-
-         /* If we want to read the descriptors back, we need to invalidate the
-          * whole desc pool, otherwise we might end up with stale data. */
-         panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
-         pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
+      if ((PANVK_DEBUG(TRACE) || PANVK_DEBUG(SYNC)) && ret == 0) {
+         int wait_ret = drmSyncobjWait(dev->drm_fd, &submit.out_sync, 1, INT64_MAX, 0, NULL);
+         if (wait_ret == 0) {
+            panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
+            pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
+         }
       }
 
       if (PANVK_DEBUG(TRACE)) {
@@ -103,6 +110,7 @@ panvk_queue_submit_batch(struct panvk_gpu_queue *queue,
                                   phys_dev->kmod.dev->props.gpu_id);
    }
 
+   /* Processamento dos Jobs de Fragmentos (frag_jc) */
    if (batch->frag_jc.first_job) {
       struct drm_panfrost_submit submit = {
          .bo_handles = (uintptr_t)bos,
@@ -121,16 +129,17 @@ panvk_queue_submit_batch(struct panvk_gpu_queue *queue,
       }
 
       ret = pan_kmod_ioctl(dev->drm_fd, DRM_IOCTL_PANFROST_SUBMIT, &submit);
-      assert(!ret);
-      if (PANVK_DEBUG(TRACE) || PANVK_DEBUG(SYNC)) {
-         ret = drmSyncobjWait(dev->drm_fd, &submit.out_sync, 1, INT64_MAX, 0,
-                              NULL);
-         assert(!ret);
+      if (ret < 0) {
+         mesa_logw("panvk: DRM submission warning for panfrost frag in the kbase backend %s",
+                   strerror(errno));
+      }
 
-         /* If we want to read the descriptors back, we need to invalidate the
-          * whole desc pool, otherwise we might end up with stale data. */
-         panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
-         pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
+      if ((PANVK_DEBUG(TRACE) || PANVK_DEBUG(SYNC)) && ret == 0) {
+         int wait_ret = drmSyncobjWait(dev->drm_fd, &submit.out_sync, 1, INT64_MAX, 0, NULL);
+         if (wait_ret == 0) {
+            panvk_pool_invalidate_maps(&cmdbuf->desc_pool);
+            pan_kmod_flush_bo_map_syncs(dev->kmod.dev);
+         }
       }
 
       if (PANVK_DEBUG(TRACE))
@@ -155,7 +164,7 @@ static void
 panvk_queue_transfer_sync(struct panvk_gpu_queue *queue, uint32_t syncobj)
 {
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
-   ASSERTED int ret;
+   int ret;
 
    struct drm_syncobj_handle handle = {
       .handle = queue->sync,
@@ -163,15 +172,19 @@ panvk_queue_transfer_sync(struct panvk_gpu_queue *queue, uint32_t syncobj)
       .fd = -1,
    };
 
+   if (dev->drm_fd < 0 || !syncobj || gpu_queue_uses_kbase(dev))
+      return;
+
    ret = pan_kmod_ioctl(dev->drm_fd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &handle);
-   assert(!ret);
-   assert(handle.fd >= 0);
+   if (ret < 0 || handle.fd < 0)
+      return;
 
    handle.handle = syncobj;
    ret = pan_kmod_ioctl(dev->drm_fd, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, &handle);
-   assert(!ret);
+   (void)ret;
 
-   close(handle.fd);
+   if (handle.fd >= 0)
+      close(handle.fd);
 }
 
 static void
@@ -181,16 +194,14 @@ panvk_add_wait_event_syncobjs(struct panvk_batch *batch, uint32_t *in_fences,
    util_dynarray_foreach(&batch->event_ops, struct panvk_cmd_event_op, op) {
       switch (op->type) {
       case PANVK_EVENT_OP_SET:
-         /* Nothing to do yet */
          break;
       case PANVK_EVENT_OP_RESET:
-         /* Nothing to do yet */
          break;
       case PANVK_EVENT_OP_WAIT:
          in_fences[(*nr_in_fences)++] = op->event->syncobj;
          break;
       default:
-         UNREACHABLE("bad panvk_cmd_event_op type\n");
+         UNREACHABLE("type of panvk_cmd_event_op invalid\n");
       }
    }
 }
@@ -214,16 +225,16 @@ panvk_signal_event_syncobjs(struct panvk_gpu_queue *queue,
             .handles = (uint64_t)(uintptr_t)&event->syncobj,
             .count_handles = 1};
 
-         ASSERTED int ret = pan_kmod_ioctl(dev->drm_fd,
-                                  DRM_IOCTL_SYNCOBJ_RESET, &objs);
-         assert(!ret);
+         if (!gpu_queue_uses_kbase(dev)) {
+            int ret = pan_kmod_ioctl(dev->drm_fd, DRM_IOCTL_SYNCOBJ_RESET, &objs);
+            (void)ret;
+         }
          break;
       }
       case PANVK_EVENT_OP_WAIT:
-         /* Nothing left to do */
          break;
       default:
-         UNREACHABLE("bad panvk_cmd_event_op type\n");
+         UNREACHABLE("type of panvk_cmd_event_op invalid\n");
       }
    }
 }
@@ -238,12 +249,15 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
    uint32_t semaphores[nr_semaphores];
 
    semaphores[0] = queue->sync;
-   for (unsigned i = 0; i < submit->wait_count; i++) {
-      assert(vk_sync_type_is_drm_syncobj(submit->waits[i].sync->type));
-      struct vk_drm_syncobj *syncobj =
-         vk_sync_as_drm_syncobj(submit->waits[i].sync);
 
-      semaphores[i + 1] = syncobj->syncobj;
+   for (unsigned i = 0; i < submit->wait_count; i++) {
+      if (submit->waits[i].sync && vk_sync_type_is_drm_syncobj(submit->waits[i].sync->type)) {
+         struct vk_drm_syncobj *syncobj = vk_sync_as_drm_syncobj(submit->waits[i].sync);
+         if (syncobj)
+            semaphores[i + 1] = syncobj->syncobj;
+      } else {
+         semaphores[i + 1] = 0;
+      }
    }
 
    for (uint32_t j = 0; j < submit->command_buffer_count; ++j) {
@@ -251,7 +265,6 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
          container_of(submit->command_buffers[j], struct panvk_cmd_buffer, vk);
 
       list_for_each_entry(struct panvk_batch, batch, &cmdbuf->batches, node) {
-         /* FIXME: should be done at the batch level */
          unsigned nr_bos = panvk_pool_num_bos(&cmdbuf->desc_pool) +
                            panvk_pool_num_bos(&cmdbuf->varying_pool) +
                            panvk_pool_num_bos(&cmdbuf->tls_pool) +
@@ -285,7 +298,6 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
          bos[bo_idx++] = pan_kmod_bo_handle(dev->sample_positions->bo);
          assert(bo_idx == nr_bos);
 
-         /* Merge identical BO entries. */
          for (unsigned x = 0; x < nr_bos; x++) {
             for (unsigned y = x + 1; y < nr_bos;) {
                if (bos[x] == bos[y])
@@ -311,13 +323,12 @@ panvk_per_arch(gpu_queue_submit)(struct vk_queue *vk_queue, struct vk_queue_subm
       }
    }
 
-   /* Transfer the out fence to signal semaphores */
    for (unsigned i = 0; i < submit->signal_count; i++) {
-      assert(vk_sync_type_is_drm_syncobj(submit->signals[i].sync->type));
-      struct vk_drm_syncobj *syncobj =
-         vk_sync_as_drm_syncobj(submit->signals[i].sync);
-
-      panvk_queue_transfer_sync(queue, syncobj->syncobj);
+      if (submit->signals[i].sync && vk_sync_type_is_drm_syncobj(submit->signals[i].sync->type)) {
+         struct vk_drm_syncobj *syncobj = vk_sync_as_drm_syncobj(submit->signals[i].sync);
+         if (syncobj)
+            panvk_queue_transfer_sync(queue, syncobj->syncobj);
+      }
    }
 
    return VK_SUCCESS;
@@ -336,7 +347,6 @@ panvk_per_arch(create_gpu_queue)(struct panvk_device *device,
       priority_info ? priority_info->globalPriority
                     : VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR;
 
-   /* XXX: Panfrost kernel module doesn't support priorities so far */
    assert(priority == VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR);
 
    struct panvk_gpu_queue *queue = vk_zalloc(&device->vk.alloc, sizeof(*queue), 8,
@@ -349,19 +359,20 @@ panvk_per_arch(create_gpu_queue)(struct panvk_device *device,
    if (result != VK_SUCCESS)
       goto err_free_queue;
 
-   int ret = drmSyncobjCreate(device->drm_fd, DRM_SYNCOBJ_CREATE_SIGNALED,
-                              &queue->sync);
-   if (ret) {
-      result = panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
-      goto err_finish_queue;
+   if (!gpu_queue_uses_kbase(device)) {
+      int ret = drmSyncobjCreate(device->drm_fd, DRM_SYNCOBJ_CREATE_SIGNALED,
+                                 &queue->sync);
+      if (ret < 0) {
+         mesa_logw("panvk: drmSyncobjCreate not supported");
+         queue->sync = 0;
+      }
+   } else {
+      queue->sync = 0;
    }
 
    queue->vk.driver_submit = panvk_per_arch(gpu_queue_submit);
    *out_queue = &queue->vk;
    return VK_SUCCESS;
-
-err_finish_queue:
-   vk_queue_finish(&queue->vk);
 
 err_free_queue:
    vk_free(&device->vk.alloc, queue);
@@ -374,7 +385,8 @@ void panvk_per_arch(destroy_gpu_queue)(struct vk_queue *vk_queue)
    struct panvk_device *dev = to_panvk_device(vk_queue->base.device);
 
    vk_queue_finish(&queue->vk);
-   drmSyncobjDestroy(dev->drm_fd, queue->sync);
+   if (queue->sync != 0 && !gpu_queue_uses_kbase(dev))
+      drmSyncobjDestroy(dev->drm_fd, queue->sync);
    vk_free(&dev->vk.alloc, queue);
 }
 
@@ -390,19 +402,19 @@ panvk_per_arch(QueueWaitIdle)(VkQueue _queue)
    VK_FROM_HANDLE(panvk_gpu_queue, queue, _queue);
    struct panvk_device *dev = to_panvk_device(queue->vk.base.device);
 
-   /* we need to use vk_common_QueueWaitIdle if we ever go threaded */
    assert(queue->vk.submit.mode != VK_QUEUE_SUBMIT_MODE_THREADED);
 
    if (vk_device_is_lost(&dev->vk)) {
-      /* Check printf buffer one more time before exiting */
       u_printf_with_ctx(stdout, &dev->printf.ctx);
       return VK_ERROR_DEVICE_LOST;
    }
 
-   ASSERTED int ret = drmSyncobjWait(dev->drm_fd, &queue->sync, 1,
-                                     INT64_MAX, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
-                                     NULL);
-   assert(!ret);
+   if (queue->sync != 0 && !gpu_queue_uses_kbase(dev)) {
+      int ret = drmSyncobjWait(dev->drm_fd, &queue->sync, 1,
+                               INT64_MAX, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL,
+                               NULL);
+      (void)ret;
+   }
 
    return VK_SUCCESS;
 }
