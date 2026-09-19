@@ -7,6 +7,8 @@ meson setup build   -Dvulkan-drivers=panfrost   -Dgallium-drivers=   -Dplatforms
 
 using patches from: https://github.com/LukeValen/panvk-mali-g52
 
+discord: https://discord.gg/mkFw8mfWBU
+
 `Mesa <https://mesa3d.org>`_ - The 3D Graphics Library
 ======================================================
 
