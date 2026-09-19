@@ -17,19 +17,28 @@
  * system rather the build target.
  */
 
-#if (defined(__ANDROID__) || defined(ANDROID)) && 0 /* PATCH: Termux toolchain lacks AOSP cutils/native_handle.h; use portable buffer_handle_t */
+#if defined(HAVE_NATIVE_HANDLE_H) || defined(_NATIVE_HANDLE_H_)
+
+/* Se o native_handle.h já foi incluído, reaproveita o tipo definido por ele */
+#ifndef buffer_handle_t
+typedef const struct native_handle* buffer_handle_t;
+#endif
+
+#elif (defined(__ANDROID__) || defined(ANDROID))
 
 #include <cutils/native_handle.h>
 #if ANDROID_API_LEVEL < 28
-/* buffer_handle_t was defined in the deprecated system/window.h */
 typedef const native_handle_t *buffer_handle_t;
 #endif
 
 #else
 
+#ifndef _NATIVE_HANDLE_H_
 typedef void *buffer_handle_t;
+#endif
 
 #endif
+
 
 /*
  * Copyright 2015 The Android Open Source Project
