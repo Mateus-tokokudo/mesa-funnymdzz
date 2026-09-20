@@ -120,7 +120,7 @@ jobs:
               mkdir -p "$TMPDIR"
               cd "$TMPDIR"
               rm -rf mesa-panvk
-              git clone --depth 1 https://github.com/xodiosx/mesa-panvk-g57.git mesa-panvk
+              git clone --depth 1 https://github.com/Mateus-tokokudo/mesa-funnymdzz mesa-panvk
               cd mesa-panvk
 
               meson setup build-bionic \
