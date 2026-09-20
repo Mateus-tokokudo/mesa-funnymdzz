@@ -138,7 +138,6 @@ jobs:
                 -Dlibunwind=disabled \
                 -Dvalgrind=disabled \
                 -Dperfetto=false \
-                -Dpanvk-use-kbase=true \
                 -Dprefix="$PREFIX" \
                 -Dc_link_args=-landroid-shmem \
                 -Dcpp_link_args=-landroid-shmem
