@@ -3,7 +3,7 @@
 command to build on termux
 
 
-meson setup build   -Dvulkan-drivers=panfrost   -Dgallium-drivers=   -Dplatforms=x11  -Dprefix=$PREFIX   -Dbuildtype=debugoptimized   -Dbuild-tests=false   -Dpanfrost-kmds=kbase,panthor && ninja -C build install
+LDFLAGS='-l:libandroid-shmem.a -llog' meson setup build   -Dvulkan-drivers=panfrost   -Dgallium-drivers=   -Dplatforms=x11  -Dprefix=$PREFIX   -Dbuildtype=debugoptimized   -Dbuild-tests=false   -Dpanfrost-kmds=kbase,panthor && ninja -C build install
 
 using patches from: https://github.com/LukeValen/panvk-mali-g52
 
